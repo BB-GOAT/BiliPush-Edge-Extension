@@ -44,7 +44,7 @@ BiliPush-Edge-Extension/
 │   ├── ARCHITECTURE.md         # 数据流、状态字段、模块边界、接口依赖
 │   ├── TESTING.md              # 自动检查、人工回归、已验证边界
 │   └── initial-validation.txt  # 整理前的历史验证记录
-├── CHANGELOG.md               # 按日期与变更内容记录，不自动增长版本号
+├── CHANGELOG.md               # 面向用户的版本更新日志
 ├── AGENTS.md                  # 后续代理必须遵守的维护规则
 ├── package.json               # 本地工具命令；不参与浏览器运行
 ├── .editorconfig              # UTF-8、LF、两空格缩进
@@ -64,7 +64,7 @@ BiliPush-Edge-Extension/
 2. **定位与修改**：接口、后台或通知问题先看 `src/background.js`；解析与去重看 `src/core.js`；设置页看 `src/options/`。修复已有缺陷时，补能复现问题的回归场景。
 3. **本地检查**：执行下方 `node scripts/check.mjs`，同时验证资源路径、语法、权限清单与回归测试。只运行逻辑测试可用 `node tests/regression.mjs`。
 4. **Edge 验证**：重新加载扩展并重新打开设置页，按 [人工回归清单](docs/TESTING.md) 验证本次变更。接口或登录变动必须实测；模拟测试不能代替真实 B站请求。
-5. **记录与提交**：更新 `CHANGELOG.md`，说明具体行为、验证结果与未验证项。运行 `git diff --check` 和 `git diff` 后提交。`manifest.json` 和 `package.json` 的版本保持 `1.0.0`，除非用户明确要求更改。
+5. **记录与提交**：在 Git 提交中说明变更，验证结果按需记入 `docs/TESTING.md`。运行 `git diff --check` 和 `git diff` 后提交。只有用户明确要求修改版本号时，才同步修改 `manifest.json` 和 `package.json`，并在 `CHANGELOG.md` 用简短、通俗的话记录用户能感知的更新。
 6. **合并或分发**：本地独立维护可在检查后使用 `git switch main`、`git merge --ff-only 分支名`。提交干净后再打包，使 ZIP 能追溯到准确提交。是否发布到远端或商店，由用户另行决定。
 
 ```powershell
@@ -73,7 +73,7 @@ node scripts/check.mjs
 git diff --check
 git status --short
 # 确认本次修改范围后：
-git add -- src tests scripts docs README.md CHANGELOG.md AGENTS.md manifest.json package.json .gitignore .gitattributes .editorconfig assets
+# git add -- 路径1 路径2
 git commit -m '修复：说明具体触发条件与结果'
 ```
 
@@ -133,4 +133,4 @@ git switch main
 
 最初只读研究了用户提供的 Bilibili-Cedar 发行目录：它查询关注动态流，分页入库，再通过 OneBot 推送。本扩展独立编写，没有复制其代码、数据库或登录信息，也不需要运行 Cedar。
 
-2026-11-21 用户截图确认：整理前的代码可读取账号与视频列表，Windows 测试通知首次显示正常。之后用户报告重复测试无横幅；本次维护已改为独立通知 ID，并补充离线测试。目录整理后的真实浏览器行为及重复横幅仍需重新加载后验证。等待真实新投稿触发自动提醒的长期运行情况尚未验证。
+2026-11-21 用户截图确认：整理前的代码可读取账号与视频列表，Windows 测试通知首次显示正常。之后用户报告重复测试无横幅；测试通知已改为每次独立发送。整理目录后，用户反馈测试提示图片加载失败，已修正通知的图标地址并补充离线回归。实际横幅仍需重新加载后验证。等待真实新投稿触发自动提醒的长期运行情况尚未验证。

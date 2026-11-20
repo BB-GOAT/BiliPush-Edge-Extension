@@ -87,6 +87,12 @@ globalThis.chrome = {
   },
   notifications: {
     async create(id, options) {
+      // 按后台脚本位置解析图标，实际读取图片，覆盖移动目录后的资源加载。
+      const icon = new URL(options.iconUrl, chrome.runtime.getURL('src/background.js'));
+      assert.equal(icon.protocol, 'chrome-extension:');
+      assert.equal(icon.hostname, chrome.runtime.id);
+      const bytes = await fs.readFile(new URL(`.${icon.pathname}`, root));
+      assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
       if (notificationFail) throw Error('通知失败');
       sent.push({ id, ...options });
       activeNotifications.set(id, options);

@@ -1,6 +1,8 @@
 import { DEFAULTS, normalizeSettings, scanFeed, matches } from './core.js';
 
 const ALARM = 'check-videos';
+// 使用扩展根目录下的完整地址，避免通知图标随后台脚本目录解析。
+const NOTIFICATION_ICON = chrome.runtime.getURL('assets/icon.png');
 const API = 'https://api.bilibili.com';
 const EMPTY = { account: '', seen: [], baseline: false, pending: [], history: [], failures: 0 };
 const emptyState = () => ({ ...EMPTY, seen: [], pending: [], history: [] });
@@ -55,7 +57,7 @@ async function flush(state, settings) {
     // 设置变更后尚未发送的通知也遵循最新筛选规则。
     if (matches(video, settings)) {
       await chrome.notifications.create(`video:${video.id}`, {
-        type: 'basic', iconUrl: 'assets/icon.png', title: `${video.author} 投稿了新视频`,
+        type: 'basic', iconUrl: NOTIFICATION_ICON, title: `${video.author} 投稿了新视频`,
         message: video.title, silent: settings.silent
       });
     }
@@ -155,7 +157,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         for (const id of Object.keys(active)) {
           if (id === 'test' || id.startsWith('test:')) await chrome.notifications.clear(id);
         }
-        await chrome.notifications.create(`test:${crypto.randomUUID()}`, { type: 'basic', iconUrl: 'assets/icon.png',
+        await chrome.notifications.create(`test:${crypto.randomUUID()}`, { type: 'basic', iconUrl: NOTIFICATION_ICON,
           title: 'B站关注视频提醒', message: '系统通知测试成功。点击通知可返回设置面板。', silent: false });
         return { ok: true };
       }
