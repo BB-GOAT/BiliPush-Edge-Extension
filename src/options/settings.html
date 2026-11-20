@@ -9,7 +9,7 @@
   <header><img src="../../assets/icon.png" alt="" width="52" height="52"><div><h1>哔哩哔哩推送</h1><p>当关注的UP开播或更新视频/动态时发出Windows通知提醒</p></div></header>
   <section aria-labelledby="status-title">
     <div class="section-head"><h2 id="status-title">运行状态</h2><span id="badge" role="status">正在读取</span></div>
-    <dl class="overview"><div><dt>当前账号</dt><dd id="account">尚未检查</dd></div><div><dt>上次检查</dt><dd><span id="attempt">—</span><small id="attempt-trigger" hidden></small></dd></div><div><dt>下次自动检查</dt><dd id="next">—</dd></div></dl>
+    <dl class="overview"><div><dt>当前账号</dt><dd id="account">尚未检查</dd></div><div><dt>上次读取内容</dt><dd><span id="attempt">—</span><small id="attempt-trigger" hidden></small></dd></div><div><dt>下次定时读取</dt><dd id="next">—</dd></div><div><dt>下次快速检查</dt><dd id="next-quick">—</dd></div></dl>
     <div id="error" class="error" role="alert" hidden></div>
     <ul id="sources" aria-label="各类检查状态"></ul>
     <div class="buttons">
@@ -43,7 +43,9 @@
     <h2 id="settings-title">提醒设置</h2>
     <form id="settings">
       <label class="toggle"><input id="enabled" type="checkbox">启用自动检查与通知</label>
-      <div class="fields"><label>检查间隔（分钟）<input id="interval" type="number" min="1" max="60" step="1" required><small>支持 1～60 分钟，默认 3 分钟。失败时最多延至 60 分钟，可在运行状态中查看原因和重试时间。</small></label>
+      <label class="toggle"><input id="quickCheck" type="checkbox">快速检查投稿与动态（每 30 秒）</label>
+      <div class="fields"><label>普通检查间隔（分钟）<input id="interval" type="number" min="1" max="60" step="1" required><small>用于直播。关闭快速检查后，也用于投稿和动态。默认 3 分钟。</small></label>
+      <label>投稿与动态的完整检查间隔（分钟）<input id="fullInterval" type="number" min="5" max="60" step="1" required><small>快速检查开启时用于补漏，支持 5～60 分钟，默认 15 分钟。</small></label>
       <label>视频和动态的检查页数<input id="maxPages" type="number" min="1" max="10" step="1" required><small>每类最多检查这么多页，默认 5 页。</small></label></div>
       <div id="rules"></div>
       <label class="toggle"><input id="silent" type="checkbox">静音通知（仍显示桌面横幅）</label>

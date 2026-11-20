@@ -35,6 +35,10 @@ function room(number, uid = '30', status = 1) {
 
 // 设置边界、原创投稿与分页。
 equal(normalizeSettings({ interval: 0 }).interval, 1);
+equal(normalizeSettings({}).quickCheck, true);
+equal(normalizeSettings({}).fullInterval, 15);
+equal(normalizeSettings({ interval: 25 }).fullInterval, 25);
+equal(normalizeSettings({ fullInterval: 0, quickCheck: false }).fullInterval, 5);
 equal(normalizeSettings({ maxPages: 99 }).maxPages, 10);
 equal(normalizeSettings({}).issueLimit, 50);
 equal(normalizeSettings({ issueLimit: 99 }).issueLimit, 50);
@@ -71,7 +75,7 @@ await assert.rejects(scanFeed(async () => ({}), ['x'], 3));
 checks++;
 
 // 后台集成模拟：存储、定时任务、通知、消息与 B站响应均留在本进程。
-const store = { settings: { mode: 'all', uids: ['77'] } };
+const store = { settings: { mode: 'all', uids: ['77'], quickCheck: false } };
 const sessionStore = {};
 const alarms = new Map();
 const sent = [];
@@ -95,6 +99,11 @@ let dynamicError;
 let unavailableSession = false;
 let liveCalls = 0;
 let accountCalls = 0;
+let updateBaseline;
+let updateNum = 0;
+let updateStatus = 0;
+const probeCalls = [];
+const feedCalls = [];
 const followingCalls = [];
 const followingPages = new Map();
 let whisperResponse = { code: 0, data: { list: [{ mid: '70', uname: '旧悄悄关注样例', attribute: 1 }] } };
@@ -182,6 +191,13 @@ globalThis.chrome = {
 };
 globalThis.fetch = async (url, options) => {
   const parsed = new URL(url);
+  if (parsed.pathname.endsWith('/feed/all/update')) {
+    assert.equal(options.credentials, 'include');
+    probeCalls.push(Object.fromEntries(parsed.searchParams));
+    if (updateStatus) return { ok: false, status: updateStatus };
+    return { ok: true, async json() { return { code: 0, data: { update_num: updateNum } }; } };
+  }
+  if (parsed.pathname.endsWith('/feed/all')) feedCalls.push(parsed.searchParams.get('type'));
   if (parsed.pathname === '/x/web-interface/nav') accountCalls++;
   if (parsed.hostname === 'api.live.bilibili.com') {
     liveCalls++;
@@ -213,7 +229,8 @@ globalThis.fetch = async (url, options) => {
       }
       return { code: 0, data: parsed.pathname.endsWith('/nav')
         ? { isLogin: true, mid, uname: '测试账号' }
-        : { items: parsed.searchParams.get('type') === 'all' ? [...dynamics, ...feed] : feed, has_more: false } };
+        : { items: parsed.searchParams.get('type') === 'all' ? [...dynamics, ...feed] : feed,
+          has_more: false, update_baseline: updateBaseline } };
     }
   };
 };
@@ -230,7 +247,15 @@ function request(message, sender = {
     if (held !== true) reject(Error('合法设置页未保持响应通道'));
   });
 }
-const message = (type, extra = {}) => request({ type, ...extra });
+const message = (type, extra = {}) => request({ type, ...extra,
+  ...(type === 'save' ? { settings: { quickCheck: false, ...extra.settings } } : {}) });
+function fireAlarm(name = 'check-videos') {
+  const alarm = alarms.get(name);
+  assert.ok(alarm, `缺少闹钟 ${name}`);
+  alarms.delete(name);
+  chrome.alarms.onAlarm.listener({ name, ...alarm });
+  return message('status');
+}
 
 // 首次基线、定时新投稿与重复查询。
 await message('check');
@@ -240,8 +265,7 @@ equal(store.state.baseline, true);
 equal(sent.length, 0);
 equal(store.state.account, '100');
 feed = [item(2), item(1)];
-chrome.alarms.onAlarm.listener({ name: 'check-videos' });
-await message('status');
+await fireAlarm();
 equal(store.state.lastTrigger, 'alarm');
 equal(sent.length, 1);
 equal(sent[0].id, 'video:BV0000000002');
@@ -529,8 +553,7 @@ equal(JSON.stringify(sessionStore).includes('模拟服务端原始响应'), fals
 const beforeRetryIssues = structuredClone(sessionStore);
 liveFailure = false;
 const beforeRetry = liveCalls;
-chrome.alarms.onAlarm.listener({ name: 'check-videos' });
-await message('status');
+await fireAlarm();
 equal(liveCalls, beforeRetry);
 equal(sessionStore, beforeRetryIssues);
 missingLivePermission = true;
@@ -661,6 +684,7 @@ liveHttpStatus = 0;
 // 关停期间错过的计划可在启动后补查，排队中的旧闹钟不会重复查询。
 const missedCheck = Date.now() - 60000;
 store.state.nextCheck = missedCheck;
+store.state.plan = { content: missedCheck, live: missedCheck };
 alarms.delete('check-videos');
 const beforeCatchUp = accountCalls;
 chrome.runtime.onStartup.listener();
@@ -675,6 +699,145 @@ equal((await message('status')).state.lastTrigger, 'alarm');
 equal(accountCalls, beforeCatchUp + 2);
 chrome.runtime.onInstalled.listener();
 equal((await message('status')).state.lastTrigger, 'installed');
+
+// 从旧设置升级，保留已有基线。使用可控时间验证两种闹钟的排期。
+const quickAlarm = 'check-feed-updates';
+const realNow = Date.now;
+let clock = realNow();
+Date.now = () => clock;
+async function tick(name, at = alarms.get(name).scheduledTime) {
+  clock = Math.max(clock, at);
+  return fireAlarm(name);
+}
+const quickRules = Object.fromEntries(['video', 'dynamic', 'live'].map(kind => [kind, { mode: 'all', uids: [] }]));
+await message('check');
+store.settings = { ...store.settings, interval: 3, rules: quickRules };
+delete store.settings.quickCheck;
+delete store.settings.fullInterval;
+updateBaseline = '900000000000000123';
+chrome.runtime.onInstalled.listener();
+let quickState = (await message('status')).state;
+equal(store.settings.quickCheck, true);
+equal(quickState.quick.type, 'all');
+equal(quickState.quick.next - clock, 30000);
+equal(quickState.plan.content - clock, 15 * 60000);
+equal(quickState.plan.live - clock, 3 * 60000);
+const initialContentPlan = quickState.plan.content;
+const initialLivePlan = quickState.plan.live;
+const initialQuickAttempt = quickState.lastAttempt;
+const quietFeedCalls = feedCalls.length;
+const quietAccountCalls = accountCalls;
+const quietLiveCalls = liveCalls;
+quickState = (await tick(quickAlarm)).state;
+equal(probeCalls.at(-1), { type: 'all', update_baseline: '900000000000000123' });
+equal(feedCalls.length, quietFeedCalls);
+equal(accountCalls, quietAccountCalls);
+equal(liveCalls, quietLiveCalls);
+equal(quickState.lastAttempt, initialQuickAttempt);
+equal(quickState.plan, { content: initialContentPlan, live: initialLivePlan });
+
+// 重新唤醒时找回计数闹钟，但不提前跑常规检查。
+const quickDeadline = quickState.quick.next;
+alarms.delete(quickAlarm);
+chrome.runtime.onStartup.listener();
+equal((await message('status')).state.quick.next, quickDeadline);
+equal(alarms.get(quickAlarm).scheduledTime, quickDeadline);
+equal(accountCalls, quietAccountCalls);
+
+const beforeQuickNotify = sent.length;
+updateNum = 2;
+updateBaseline = '900000000000000456';
+feed = [item(70), ...feed];
+dynamics = [dynamic(5001), ...dynamics];
+quickState = (await tick(quickAlarm)).state;
+equal(quickState.lastTrigger, 'quick');
+equal(quickState.quick.cursor, updateBaseline);
+equal(feedCalls.slice(quietFeedCalls), ['all', 'video']);
+equal(sent.slice(beforeQuickNotify).map(entry => entry.id).sort(), ['dynamic:7001', 'video:BV0000000070']);
+equal(liveCalls, quietLiveCalls);
+equal(quickState.plan.live, initialLivePlan);
+equal(quickState.plan.content - clock, 15 * 60000);
+
+// 数量偶尔仍大于零也不会重复发送。同一轮一类失败时不推进共同基线。
+updateBaseline = '900000000000000457';
+dynamicError = new Error('模拟动态请求失败');
+quickState = (await tick(quickAlarm)).state;
+equal(quickState.quick.cursor, '900000000000000456');
+equal(quickState.quick.next, quickState.sources.dynamic.retryAt);
+equal(sent.length, beforeQuickNotify + 2);
+dynamicError = undefined;
+
+// 直播仍按设置独立检查，计数限流时完整扫描仍能找回新内容。
+const beforeLiveOnly = feedCalls.length;
+quickState = (await tick('check-videos')).state;
+equal(feedCalls.length, beforeLiveOnly);
+equal(liveCalls, quietLiveCalls + 1);
+updateStatus = 429;
+let result = await tick(quickAlarm);
+quickState = result.state;
+equal(quickState.quick.next - clock, 60000);
+equal(quickState.globalIssues.quick.code, 'HTTP 429');
+equal(result.diagnostics.entries[0].source, 'quick');
+equal(feedCalls.length, beforeLiveOnly);
+
+const fallbackAt = quickState.plan.content;
+const beforeFallback = probeCalls.length;
+feed = [item(71), ...feed];
+updateBaseline = '900000000000000458';
+result = await tick('check-videos', fallbackAt);
+equal(result.state.lastTrigger, 'alarm');
+equal(result.state.quick.cursor, updateBaseline);
+equal(sent.at(-1).id, 'video:BV0000000071');
+equal(probeCalls.length, beforeFallback);
+equal(result.state.quick.next, quickState.quick.next);
+updateStatus = 0;
+updateNum = 0;
+result = await tick(quickAlarm);
+equal(result.state.globalIssues.quick, undefined);
+equal(result.diagnostics.entries[0].source, 'quick');
+equal(result.diagnostics.entries[0].issue, null);
+
+// 快查事件在补查时间之后才投递时，仅运行一次补查，随后忽略旧定时事件。
+const staleFull = alarms.get('check-videos');
+const beforeBothDue = accountCalls;
+const beforeBothDueProbes = probeCalls.length;
+const beforeBothDueFeeds = feedCalls.length;
+result = await tick(quickAlarm, result.state.plan.content);
+chrome.alarms.onAlarm.listener({ name: 'check-videos', ...staleFull });
+await message('status');
+equal(result.state.lastTrigger, 'alarm');
+equal(accountCalls, beforeBothDue + 1);
+equal(probeCalls.length, beforeBothDueProbes);
+equal(feedCalls.slice(beforeBothDueFeeds), ['all', 'video']);
+
+// 旧账号的计数只用作提示。发现当前账号变更后重建其基线，不发送现有内容。
+const beforeQuickAccount = sent.length;
+mid = '999';
+updateNum = 1;
+updateBaseline = '900000000000000459';
+result = await tick(quickAlarm);
+equal(result.state.account, '999');
+equal(result.state.quick.cursor, updateBaseline);
+equal(result.state.history.every(entry => entry.detected === clock), true);
+equal(sent.length, beforeQuickAccount);
+updateNum = 0;
+
+// 仅开投稿时使用投稿流游标。暂停后两个闹钟均取消。
+await message('save', { settings: { quickCheck: true, mode: 'all' } });
+await message('check');
+result = await tick(quickAlarm);
+equal(probeCalls.at(-1), { type: 'video', update_baseline: updateBaseline });
+const staleQuick = alarms.get(quickAlarm);
+const beforePause = probeCalls.length;
+await message('save', { settings: { quickCheck: true, enabled: false, mode: 'all' } });
+equal(alarms.size, 0);
+chrome.alarms.onAlarm.listener({ name: quickAlarm, ...staleQuick });
+await message('status');
+equal(probeCalls.length, beforePause);
+await message('save', { settings: { quickCheck: false, enabled: true, interval: 3, mode: 'all' } });
+equal(alarms.has(quickAlarm), false);
+equal(store.state.plan.content - clock, 3 * 60000);
+Date.now = realNow;
 
 // 设置页无 tab、携带查询/锚点时同样合法；相似地址与其他来源不能操作后台。
 equal((await request({ type: 'status' }, {
@@ -713,4 +876,4 @@ for (const file of [
 ]) await fs.access(new URL(file, root));
 equal(manifest.manifest_version, 3);
 equal(manifest.permissions.includes('cookies'), false);
-console.log(`PASS: ${checks} 项断言，覆盖关注分页、三类测试通知、定时提醒、独立范围、基线、退避、诊断记录、图标和消息校验。`);
+console.log(`PASS: ${checks} 项断言，覆盖快查与定时补查、关注分页、三类通知、独立范围、基线、退避、诊断记录、图标和消息校验。`);

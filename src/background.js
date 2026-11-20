@@ -6,6 +6,8 @@ import {
 import { describeIssue, readIssueHistory, recordIssue, updateIssueHistory } from './diagnostics.js';
 
 const ALARM = 'check-videos';
+const QUICK_ALARM = 'check-feed-updates';
+const QUICK_INTERVAL = 30000;
 // 使用扩展根目录下的完整地址，避免通知图标随后台脚本目录解析。
 const NOTIFICATION_ICON = chrome.runtime.getURL('assets/icon.png');
 const API = 'https://api.bilibili.com';
@@ -14,6 +16,10 @@ const emptyState = () => ({
   liveRooms: null, sources: {}, globalIssues: {}, diagnosticScope: null, pending: [], history: [], failures: 0
 });
 const enabledKinds = settings => KINDS.filter(kind => settings.rules[kind].mode !== 'off');
+const isPost = kind => kind !== 'live';
+const lane = kind => isPost(kind) ? 'content' : 'live';
+const postReady = (state, kind) => kind === 'video' ? state.baseline : state.dynamicBaseline;
+const quickType = settings => settings.rules.dynamic.mode !== 'off' ? 'all' : 'video';
 const feed = (type, offset = '') => api(`/x/polymer/web-dynamic/v1/feed/all?type=${type}&timezone_offset=-480`
   + (offset ? `&offset=${encodeURIComponent(offset)}` : ''));
 const sourceErrors = (state, kinds) => kinds.filter(kind => state.sources[kind]?.error)
@@ -112,18 +118,51 @@ async function badge(text, color = '#d55435') {
   await chrome.action.setBadgeText({ text });
   await chrome.action.setBadgeBackgroundColor({ color });
 }
-async function schedule(settings, state, preserve = false) {
-  if (!settings.enabled || !enabledKinds(settings).length) {
-    await chrome.alarms.clear(ALARM);
-    state.nextCheck = null;
-  } else {
-    const existing = preserve ? await chrome.alarms.get(ALARM) : null;
-    // 浏览器重启可能清除闹钟，恢复时沿用已保存的计划，包括失败退避。
-    const savedTime = preserve && Number.isFinite(state.nextCheck) ? state.nextCheck : null;
-    const delay = Math.min(60, settings.interval * 2 ** Math.min(state.failures || 0, 6));
-    state.nextCheck = existing?.scheduledTime ?? savedTime ?? Date.now() + delay * 60000;
-    if (!existing) await chrome.alarms.create(ALARM, { when: state.nextCheck });
+async function setAlarm(name, when) {
+  const existing = await chrome.alarms.get(name);
+  if (when == null) {
+    if (existing) await chrome.alarms.clear(name);
+  } else if (existing?.scheduledTime !== when) {
+    await chrome.alarms.create(name, { when });
   }
+}
+
+async function schedule(settings, state, reset = ['content', 'live']) {
+  const kinds = settings.enabled ? enabledKinds(settings) : [];
+  const posts = kinds.filter(isPost);
+  // 升级前只有一个闹钟。沿用原定时间，执行后再分别安排完整检查和直播。
+  const previous = state.plan ?? { content: state.nextCheck, live: state.nextCheck };
+  const now = Date.now();
+  const next = (name, enabled, minutes) => {
+    if (!enabled) return null;
+    if (!reset.includes(name) && Number.isFinite(previous[name])) return previous[name];
+    return now + Math.min(60, minutes * 2 ** Math.min(state.failures || 0, 6)) * 60000;
+  };
+  const fullInterval = settings.quickCheck && posts.every(kind => postReady(state, kind))
+    ? settings.fullInterval : settings.interval;
+  state.plan = {
+    content: next('content', posts.length, fullInterval),
+    live: next('live', kinds.includes('live'), settings.interval)
+  };
+  const deadlines = Object.values(state.plan).filter(Number.isFinite);
+  state.nextCheck = deadlines.length ? Math.min(...deadlines) : null;
+  await setAlarm(ALARM, state.nextCheck);
+}
+
+async function scheduleQuick(settings, state, preserve = false) {
+  const posts = enabledKinds(settings).filter(isPost);
+  const quick = state.quick ??= {};
+  const available = settings.enabled && settings.quickCheck && posts.length && !state.failures
+    && quick.type === quickType(settings) && quick.cursor && posts.every(kind => postReady(state, kind));
+  if (available) {
+    const failures = state.globalIssues.quick?.failures ?? 0;
+    const delay = Math.min(3600000, QUICK_INTERVAL * 2 ** Math.min(failures, 7));
+    quick.next = Math.max(preserve && Number.isFinite(quick.next) ? quick.next : Date.now() + delay,
+      ...posts.map(kind => state.sources[kind]?.retryAt ?? 0));
+  } else {
+    quick.next = null;
+  }
+  await setAlarm(QUICK_ALARM, quick.next);
 }
 function notify(item, id, silent, prefix = '') {
   const kind = item.kind ?? 'video';
@@ -166,7 +205,7 @@ async function flush(state, settings, liveChecked) {
   return sent;
 }
 
-async function scanKind(kind, settings, state) {
+async function scanKind(kind, settings, state, firstPage) {
   if (kind === 'live') {
     const rooms = await liveRooms();
     const previous = new Set(state.liveRooms ?? []);
@@ -175,13 +214,18 @@ async function scanKind(kind, settings, state) {
     return { records: fresh, fresh, ready, liveRooms: rooms.map(room => room.id) };
   }
   const video = kind === 'video';
-  const ready = video ? state.baseline : state.dynamicBaseline;
+  const ready = postReady(state, kind);
   const seen = video ? state.seen : state.dynamicSeen;
-  const scan = await scanFeed(offset => feed(video ? 'video' : 'all', offset), ready ? seen : [], settings.maxPages,
+  let cursor;
+  const scan = await scanFeed(async offset => {
+    const data = await (!offset && firstPage ? firstPage : feed(video ? 'video' : 'all', offset));
+    if (!offset) cursor = numericId(data?.update_baseline);
+    return data;
+  }, ready ? seen : [], settings.maxPages,
     video ? videoFromItem : dynamicFromItem, video ? undefined : dynamicFeedId);
   const known = new Set(seen);
   return { ready, records: scan.items.filter(item => !known.has(item.id)), fresh: ready ? scan.fresh : [],
-    seen: [...new Set([...scan.seen, ...seen])].slice(0, 3000), gap: scan.gap };
+    seen: [...new Set([...scan.seen, ...seen])].slice(0, 3000), gap: scan.gap, cursor };
 }
 
 function recordScan(kind, result, state, settings) {
@@ -213,21 +257,25 @@ function setGlobalIssue(state, events, source, issue) {
   else delete state.globalIssues[source];
 }
 
-async function check(trigger, scheduledTime) {
+async function check(trigger, scheduledTime, context) {
   const manual = trigger === 'manual';
-  const { settings, state: saved } = await read();
+  const { settings, state: saved, events = [] } = context ?? await read();
   let state = saved;
   if (!settings.enabled && !manual) return;
   const kinds = enabledKinds(settings);
   if (!kinds.length) return;
   const startedAt = Date.now();
-  if (trigger === 'startup' && state.nextCheck > startedAt) return;
-  // 启动补查或手动检查已重新排期时，忽略旧计划迟到的闹钟事件。
-  if (trigger === 'alarm' && scheduledTime < state.nextCheck) return;
+  const timed = trigger === 'alarm' || trigger === 'startup';
+  if (timed && (state.nextCheck == null || scheduledTime < state.nextCheck)) return;
+  const deadline = Math.max(startedAt, scheduledTime ?? 0);
+  const targets = kinds.filter(kind => trigger === 'quick' ? isPost(kind)
+    : !timed || (state.plan[lane(kind)] ?? Infinity) <= deadline);
+  if (!targets.length) return;
+  const checkedLanes = [...new Set(targets.map(lane))];
   state.lastAttempt = startedAt;
   state.lastTrigger = trigger;
-  const events = [];
   let resetHistory = false;
+  let refreshedCursor = false;
   let phase = 'account';
   try {
     const account = await currentAccount();
@@ -238,14 +286,27 @@ async function check(trigger, scheduledTime) {
       // 用随机标记隔离会话历史，换号时即使会话存储写入失败，也不会显示上一账号的异常。
       const diagnosticScope = resetHistory ? crypto.randomUUID() : state.diagnosticScope;
       state = { ...emptyState(), account: mid, lastAttempt: state.lastAttempt, lastTrigger: trigger,
-        globalIssues, diagnosticScope };
+        globalIssues, diagnosticScope, plan: state.plan };
     }
     state.accountName = String(account.uname ?? mid);
     setGlobalIssue(state, events, 'account', null);
     phase = 'check';
     // 各来源并行读取、分别记录错误，直播或动态接口失败不阻塞投稿检查。
-    const due = kinds.filter(kind => manual || !(state.sources[kind]?.retryAt > Date.now()));
-    const scans = await Promise.allSettled(due.map(kind => scanKind(kind, settings, state)));
+    const due = targets.filter(kind => manual || !(state.sources[kind]?.retryAt > Date.now()));
+    const type = quickType(settings);
+    const anchor = type === 'all' ? 'dynamic' : 'video';
+    const dynamicFirst = settings.quickCheck && due.includes('dynamic') && due.includes('video') ? feed('all') : null;
+    const scans = await Promise.allSettled(due.map(async kind => {
+      // 先取得全部动态的基线，再读投稿，避免基线跨过投稿请求取不到的新内容。
+      if (kind === 'video' && dynamicFirst) await dynamicFirst.catch(() => {});
+      return scanKind(kind, settings, state, kind === 'dynamic' ? dynamicFirst : null);
+    }));
+    if (settings.quickCheck && due.includes(anchor) && kinds.filter(isPost).every(kind =>
+      scans[due.indexOf(kind)]?.status === 'fulfilled')) {
+      const cursor = scans[due.indexOf(anchor)].value.cursor;
+      state.quick = { ...state.quick, type, cursor };
+      refreshedCursor = true;
+    }
     const records = [];
     let liveChecked = false;
     for (const [index, kind] of due.entries()) {
@@ -288,9 +349,45 @@ async function check(trigger, scheduledTime) {
     state.error = issue.message;
     await badge('!');
   }
-  await schedule(settings, state);
+  const reset = state.failures ? undefined : trigger === 'quick' && !refreshedCursor ? [] : checkedLanes;
+  await schedule(settings, state, reset);
+  await scheduleQuick(settings, state, trigger !== 'quick' && (!refreshedCursor || Boolean(state.globalIssues.quick)));
   await chrome.storage.local.set({ state });
   if (events.length || resetHistory) await updateIssueHistory(settings.issueLimit, state.diagnosticScope, events);
+}
+
+async function checkQuick(scheduledTime) {
+  const { settings, state } = await read();
+  const quick = state.quick;
+  if (!settings.enabled || !settings.quickCheck || !quick?.next || scheduledTime < quick.next) return;
+  // 完整检查也到期时，由它拉取列表并更新基线，省去一次计数请求。
+  const deadline = Math.max(Date.now(), scheduledTime);
+  if (state.plan.content != null && state.plan.content <= deadline) {
+    await check('alarm', deadline);
+    return;
+  }
+  const events = [];
+  let count = 0;
+  let issue = null;
+  try {
+    const query = new URLSearchParams({ type: quick.type, update_baseline: quick.cursor });
+    const data = await api(`/x/polymer/web-dynamic/v1/feed/all/update?${query}`);
+    if (!Number.isSafeInteger(data?.update_num) || data.update_num < 0) {
+      throw new CheckError('response', 'B 站没有返回有效的新动态数量。');
+    }
+    count = data.update_num;
+  } catch (error) {
+    issue = describeIssue(error, { category: 'check', message: '快速检查发生异常。', code: null });
+  }
+  setGlobalIssue(state, events, 'quick', issue);
+  if (count > 0) {
+    await check('quick', undefined, { settings, state, events });
+    return;
+  }
+  await scheduleQuick(settings, state);
+  await chrome.storage.local.set({ state });
+  if (events.length) await updateIssueHistory(settings.issueLimit, state.diagnosticScope, events);
+  if (issue || events.length) await badge(state.error || Object.keys(state.globalIssues).length ? '!' : '');
 }
 
 async function saveSettings(input) {
@@ -307,7 +404,9 @@ async function saveSettings(input) {
   if (!state.pending.length) delete state.globalIssues.notification;
   const kinds = enabledKinds(settings);
   if (!state.failures) state.error = sourceErrors(state, kinds);
+  if (!settings.quickCheck || !kinds.some(isPost)) delete state.globalIssues.quick;
   await schedule(settings, state);
+  await scheduleQuick(settings, state, true);
   await chrome.storage.local.set({ settings, state });
   const warning = state.error || Object.keys(state.globalIssues).length;
   await badge(settings.enabled && kinds.length ? (warning ? '!' : '') : '停', '#64748b');
@@ -363,12 +462,13 @@ async function testNotification(kind = 'video', demo = false) {
 async function initialize() {
   await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
   const { settings, state } = await read();
-  await schedule(settings, state, true);
+  await schedule(settings, state, []);
+  await scheduleQuick(settings, state, true);
   await chrome.storage.local.set({ settings, state });
 }
 async function resumeChecks() {
   await initialize();
-  await check('startup');
+  await check('startup', Date.now());
 }
 
 async function openNotificationPage(url) {
@@ -405,6 +505,7 @@ chrome.runtime.onInstalled.addListener(() => { void serial(async () => { await i
 chrome.runtime.onStartup.addListener(() => { void serial(resumeChecks); });
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === ALARM) void serial(() => check('alarm', alarm.scheduledTime));
+  if (alarm.name === QUICK_ALARM) void serial(() => checkQuick(alarm.scheduledTime));
 });
 chrome.action.onClicked.addListener(() => { void chrome.runtime.openOptionsPage(); });
 chrome.notifications.onClicked.addListener(handleNotificationClick);

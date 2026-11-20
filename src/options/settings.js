@@ -12,8 +12,9 @@ const compactTime = value => {
     ? date.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
     : time(value);
 };
-const CHECK_LABELS = { ...KIND_LABELS, account: '登录检查', notification: '通知发送', check: '扩展运行' };
-const TRIGGER_LABELS = { alarm: '定时检查', manual: '手动检查', startup: 'Edge 启动', installed: '安装或更新后检查' };
+const CHECK_LABELS = { ...KIND_LABELS, account: '登录检查', notification: '通知发送', check: '扩展运行', quick: '快速检查' };
+const TRIGGER_LABELS = { alarm: '定时检查', manual: '手动检查', startup: 'Edge 启动',
+  installed: '安装或更新后检查', quick: '快速检查发现更新' };
 const issueText = ({ message, code }) => code && !message.includes(code)
   ? `${message.replace(/。$/, '')}（${code}）。`
   : message;
@@ -77,6 +78,11 @@ function renderStatus(settings, state) {
     $(id).textContent = compactTime(value);
     $(id).title = value ? time(value) : '';
   }
+  const quick = $('next-quick');
+  const quickAt = state.quick?.next;
+  quick.textContent = !settings.enabled || !settings.quickCheck || !kinds.some(kind => kind !== 'live')
+    ? '已关闭' : quickAt ? new Date(quickAt).toLocaleTimeString('zh-CN', { hour12: false }) : '等待完整检查';
+  quick.title = quickAt ? time(quickAt) : '';
   const trigger = $('attempt-trigger');
   trigger.textContent = TRIGGER_LABELS[state.lastTrigger] ?? '';
   trigger.hidden = !trigger.textContent;
@@ -116,7 +122,8 @@ function renderStatus(settings, state) {
       retry.hidden = !settings.enabled || !entry.retryAt;
       retry.querySelector('strong').textContent = entry.retryAt > Date.now()
         ? `${compactTime(entry.retryAt)} 后可重试` : '已到可重试时间';
-      retry.querySelector('span').textContent = !state.nextCheck ? '' : Math.max(state.nextCheck, Date.now()) < entry.retryAt
+      const next = state.plan?.[kind === 'live' ? 'live' : 'content'];
+      retry.querySelector('span').textContent = !next ? '' : Math.max(next, Date.now()) < entry.retryAt
         ? `下轮自动检查会跳过${KIND_LABELS[kind]}` : '等待下轮自动检查';
     } else if (enabled) {
       meta.textContent = success || (entry ? '暂无成功时间' : '尚未完成检查');
@@ -153,8 +160,8 @@ function renderDiagnostics(settings, { entries, available }) {
 
 function render({ settings, state, diagnostics }, fill = false) {
   if (fill) {
-    for (const key of ['interval', 'maxPages']) $(key).value = settings[key];
-    for (const key of ['enabled', 'silent']) $(key).checked = settings[key];
+    for (const key of ['interval', 'fullInterval', 'maxPages']) $(key).value = settings[key];
+    for (const key of ['enabled', 'quickCheck', 'silent']) $(key).checked = settings[key];
     for (const kind of KINDS) {
       const field = ruleFields[kind];
       field.mode.value = settings.rules[kind].mode;
@@ -214,7 +221,8 @@ $('settings').addEventListener('submit', event => {
       rules[kind] = { mode: mode.value, uids };
     }
     const settings = {
-      enabled: $('enabled').checked, silent: $('silent').checked,
+      enabled: $('enabled').checked, quickCheck: $('quickCheck').checked, silent: $('silent').checked,
+      fullInterval: Number($('fullInterval').value),
       interval: Number($('interval').value), maxPages: Number($('maxPages').value), rules
     };
     // 权限申请必须从「保存设置」的用户操作直接发起。

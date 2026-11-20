@@ -27,9 +27,12 @@ function normalizeRule(input, fallback) {
 export function normalizeSettings(input = {}) {
   const number = (value, fallback, min, max) => Number.isFinite(Number(value))
     ? Math.min(max, Math.max(min, Math.round(Number(value)))) : fallback;
+  const interval = number(input.interval ?? 3, 3, 1, 60);
   return {
     enabled: input.enabled !== false,
-    interval: number(input.interval ?? 3, 3, 1, 60),
+    interval,
+    quickCheck: input.quickCheck !== false,
+    fullInterval: number(input.fullInterval ?? Math.max(15, interval), 15, 5, 60),
     rules: {
       // 保留升级前的视频提醒范围和 UID。
       video: normalizeRule(input.rules?.video ?? input, 'all'),
