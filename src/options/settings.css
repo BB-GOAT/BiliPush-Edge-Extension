@@ -22,6 +22,7 @@
   gap: 10px 20px;
 }
 .overview dd { font-size: 14px; font-weight: 600; }
+.overview small { margin-top: 2px; }
 #badge.warning { color: #844800; background: #fff1d9; }
 #error p { margin: 0; }
 #error p + p { margin-top: 6px; }

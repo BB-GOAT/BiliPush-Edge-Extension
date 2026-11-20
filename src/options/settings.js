@@ -13,6 +13,7 @@ const compactTime = value => {
     : time(value);
 };
 const CHECK_LABELS = { ...KIND_LABELS, account: '登录检查', notification: '通知发送', check: '扩展运行' };
+const TRIGGER_LABELS = { alarm: '定时检查', manual: '手动检查', startup: 'Edge 启动', installed: '安装或更新后检查' };
 const issueText = ({ message, code }) => code && !message.includes(code)
   ? `${message.replace(/。$/, '')}（${code}）。`
   : message;
@@ -76,6 +77,9 @@ function renderStatus(settings, state) {
     $(id).textContent = compactTime(value);
     $(id).title = value ? time(value) : '';
   }
+  const trigger = $('attempt-trigger');
+  trigger.textContent = TRIGGER_LABELS[state.lastTrigger] ?? '';
+  trigger.hidden = !trigger.textContent;
 
   const alert = $('error');
   alert.replaceChildren();

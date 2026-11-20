@@ -78,6 +78,10 @@ const sent = [];
 const activeNotifications = new Map();
 const cleared = [];
 const opened = [];
+const focusedWindows = [];
+const newWindows = [];
+let currentWindow = { id: 1, state: 'normal', focused: true };
+let closeWindowOnOpen = false;
 let notificationFail = false;
 let mid = '100';
 let feed = [item(1)];
@@ -145,7 +149,21 @@ globalThis.chrome = {
     },
     onClicked: event()
   },
-  tabs: { async create(options) { opened.push(options); } },
+  tabs: {
+    async create(options) {
+      if (closeWindowOnOpen) currentWindow = null;
+      if (!currentWindow || options.windowId !== currentWindow.id) throw Error('没有可用的浏览器窗口');
+      opened.push(options);
+    }
+  },
+  windows: {
+    async getLastFocused() {
+      if (!currentWindow) throw Error('没有可用的浏览器窗口');
+      return { ...currentWindow };
+    },
+    async create(options) { newWindows.push(options); },
+    async update(id, options) { focusedWindows.push({ id, ...options }); }
+  },
   permissions: {
     async contains({ origins }) {
       equal(origins, ['https://api.live.bilibili.com/*']);
@@ -214,6 +232,7 @@ const message = (type, extra = {}) => request({ type, ...extra });
 
 // 首次基线、定时新投稿与重复查询。
 await message('check');
+equal(store.state.lastTrigger, 'manual');
 equal(store.settings.rules.video, { mode: 'all', uids: ['77'] });
 equal(store.state.baseline, true);
 equal(sent.length, 0);
@@ -221,6 +240,7 @@ equal(store.state.account, '100');
 feed = [item(2), item(1)];
 chrome.alarms.onAlarm.listener({ name: 'check-videos' });
 await message('status');
+equal(store.state.lastTrigger, 'alarm');
 equal(sent.length, 1);
 equal(sent[0].id, 'video:BV0000000002');
 await message('check');
@@ -351,9 +371,9 @@ equal(secondTest !== firstTest, true);
 equal(activeNotifications.has(firstTest), false);
 equal(activeNotifications.has(secondTest), true);
 equal(activeNotifications.has('video:BV0000000006'), true);
-chrome.notifications.onClicked.listener(secondTest);
+await chrome.notifications.onClicked.listener(secondTest);
 equal(opened.at(-1).url, 'https://www.bilibili.com/video/BV0000000007/');
-chrome.notifications.onClicked.listener('video:BV0000000006');
+await chrome.notifications.onClicked.listener('video:BV0000000006');
 equal(opened.at(-1).url, 'https://www.bilibili.com/video/BV0000000006/');
 equal(store, beforeTest);
 equal(sessionStore, beforeTestIssues);
@@ -373,9 +393,9 @@ const previewDynamic = sent.at(-1).id;
 equal(previewDynamic !== firstPreviewDynamic, true);
 equal(activeNotifications.has(firstPreviewDynamic), false);
 equal(activeNotifications.has(previewVideo), true);
-chrome.notifications.onClicked.listener(previewDynamic);
+await chrome.notifications.onClicked.listener(previewDynamic);
 equal(opened.at(-1).url, 'https://t.bilibili.com/2002');
-chrome.notifications.onClicked.listener('test:BV0000000007:legacy');
+await chrome.notifications.onClicked.listener('test:BV0000000007:legacy');
 equal(opened.at(-1).url, 'https://www.bilibili.com/video/BV0000000007/');
 dynamicPages.clear();
 await assert.rejects(message('test', { kind: 'dynamic' }), /没有可用于测试的普通动态/);
@@ -390,7 +410,7 @@ equal(await message('test', { kind: 'live' }), { title: '直播 2' });
 const previewLive = sent.at(-1).id;
 equal(previewLive.startsWith('test:live:3002:'), true);
 equal(sent.at(-1).title, '【测试】主播 开播了');
-chrome.notifications.onClicked.listener(previewLive);
+await chrome.notifications.onClicked.listener(previewLive);
 equal(opened.at(-1).url, 'https://live.bilibili.com/3002');
 rooms = [];
 const beforeEmptyLive = sent.length;
@@ -402,7 +422,7 @@ const previewDemo = sent.at(-1).id;
 equal(liveCalls, beforeDemo);
 equal(previewDemo.startsWith('test:live:demo:'), true);
 equal(sent.at(-1).title, '【测试·演示样例】示例 UP 主 开播了');
-chrome.notifications.onClicked.listener(previewDemo);
+await chrome.notifications.onClicked.listener(previewDemo);
 equal(opened.at(-1), 'options');
 equal(store, beforeTest);
 equal(sessionStore, beforeTestIssues);
@@ -433,10 +453,39 @@ await message('check');
 equal(sent.slice(sentBeforeNewKinds).map(entry => entry.id.replace(/^(live:\d+):.+$/, '$1')),
   ['video:BV0000000009', 'dynamic:2002', 'dynamic:2005', 'live:3002']);
 const firstLive = sent.at(-1).id;
-chrome.notifications.onClicked.listener('dynamic:2002');
+await chrome.notifications.onClicked.listener('dynamic:2002');
 equal(opened.at(-1).url, 'https://t.bilibili.com/2002');
-chrome.notifications.onClicked.listener(firstLive);
+await chrome.notifications.onClicked.listener(firstLive);
 equal(opened.at(-1).url, 'https://live.bilibili.com/3002');
+
+// Edge 在后台运行时，点击通知也应打开原动态，并让目标窗口可见。
+const dynamicUrl = 'https://t.bilibili.com/2002';
+const tabCount = opened.length;
+const beforeNotificationClick = structuredClone(store);
+currentWindow = null;
+await chrome.notifications.onClicked.listener('dynamic:2002');
+equal(newWindows, [{ url: dynamicUrl, type: 'normal', focused: true }]);
+equal(opened.length, tabCount);
+equal(cleared.at(-1), 'dynamic:2002');
+
+currentWindow = { id: 2, state: 'minimized', focused: false };
+await chrome.notifications.onClicked.listener(previewDynamic);
+equal(opened.at(-1), { url: dynamicUrl, windowId: 2 });
+equal(focusedWindows.at(-1), { id: 2, state: 'normal', focused: true });
+equal(newWindows.length, 1);
+
+currentWindow = { id: 3, state: 'maximized', focused: false };
+await chrome.notifications.onClicked.listener('dynamic:2002');
+equal(opened.at(-1), { url: dynamicUrl, windowId: 3 });
+equal(focusedWindows.at(-1), { id: 3, focused: true });
+
+closeWindowOnOpen = true;
+await chrome.notifications.onClicked.listener('dynamic:2002');
+equal(newWindows.at(-1), { url: dynamicUrl, type: 'normal', focused: true });
+equal(newWindows.length, 2);
+equal(store, beforeNotificationClick);
+closeWindowOnOpen = false;
+currentWindow = { id: 1, state: 'normal', focused: true };
 
 // 持续直播只提醒一次，关播后再次开播可以产生新横幅。
 await message('check');
@@ -591,6 +640,11 @@ await message('check');
 equal(sessionStore.recentIssues.scope, newAccount.state.diagnosticScope);
 equal(sessionStore.recentIssues.entries.length, 1);
 liveHttpStatus = 0;
+
+chrome.runtime.onStartup.listener();
+equal((await message('status')).state.lastTrigger, 'startup');
+chrome.runtime.onInstalled.listener();
+equal((await message('status')).state.lastTrigger, 'installed');
 
 // 设置页无 tab、携带查询/锚点时同样合法；相似地址与其他来源不能操作后台。
 equal((await request({ type: 'status' }, {

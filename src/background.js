@@ -211,13 +211,15 @@ function setGlobalIssue(state, events, source, issue) {
   else delete state.globalIssues[source];
 }
 
-async function check(manual = false) {
+async function check(trigger) {
+  const manual = trigger === 'manual';
   const { settings, state: saved } = await read();
   let state = saved;
   if (!settings.enabled && !manual) return;
   const kinds = enabledKinds(settings);
   if (!kinds.length) return;
   state.lastAttempt = Date.now();
+  state.lastTrigger = trigger;
   const events = [];
   let resetHistory = false;
   let phase = 'account';
@@ -229,7 +231,8 @@ async function check(manual = false) {
       const globalIssues = resetHistory ? {} : state.globalIssues;
       // 用随机标记隔离会话历史，换号时即使会话存储写入失败，也不会显示上一账号的异常。
       const diagnosticScope = resetHistory ? crypto.randomUUID() : state.diagnosticScope;
-      state = { ...emptyState(), account: mid, lastAttempt: state.lastAttempt, globalIssues, diagnosticScope };
+      state = { ...emptyState(), account: mid, lastAttempt: state.lastAttempt, lastTrigger: trigger,
+        globalIssues, diagnosticScope };
     }
     state.accountName = String(account.uname ?? mid);
     setGlobalIssue(state, events, 'account', null);
@@ -357,20 +360,43 @@ async function initialize() {
   await schedule(settings, state, true);
   await chrome.storage.local.set({ settings, state });
 }
-chrome.runtime.onInstalled.addListener(() => { void serial(async () => { await initialize(); await check(); }); });
-chrome.runtime.onStartup.addListener(() => { void serial(async () => { await initialize(); await check(); }); });
-chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === ALARM) void serial(() => check());
-});
-chrome.action.onClicked.addListener(() => { void chrome.runtime.openOptionsPage(); });
-chrome.notifications.onClicked.addListener(id => {
+async function openNotificationPage(url) {
+  let window;
+  try {
+    window = await chrome.windows.getLastFocused({ windowTypes: ['normal'] });
+    await chrome.tabs.create({ url, windowId: window.id });
+  } catch {
+    // 关掉最后一个窗口后，Edge 仍可能在后台接收通知点击。
+    await chrome.windows.create({ url, type: 'normal', focused: true });
+    return;
+  }
+  if (window.state === 'minimized') {
+    await chrome.windows.update(window.id, { state: 'normal', focused: true });
+  } else if (!window.focused) {
+    await chrome.windows.update(window.id, { focused: true });
+  }
+}
+
+async function handleNotificationClick(id) {
   const [kind, itemId, testId] = id.split(':');
   const test = kind === 'test';
   const url = test && KINDS.includes(itemId) ? itemUrl(itemId, testId) : itemUrl(test ? 'video' : kind, itemId);
-  if (url) void chrome.tabs.create({ url });
-  else if (test) void chrome.runtime.openOptionsPage();
-  void chrome.notifications.clear(id);
+  try {
+    if (url) await openNotificationPage(url);
+    else if (test) await chrome.runtime.openOptionsPage();
+    await chrome.notifications.clear(id);
+  } catch (error) {
+    console.warn('无法处理通知点击。', error);
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => { void serial(async () => { await initialize(); await check('installed'); }); });
+chrome.runtime.onStartup.addListener(() => { void serial(async () => { await initialize(); await check('startup'); }); });
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === ALARM) void serial(() => check('alarm'));
 });
+chrome.action.onClicked.addListener(() => { void chrome.runtime.openOptionsPage(); });
+chrome.notifications.onClicked.addListener(handleNotificationClick);
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id) return;
   // 设置面板作为标签页打开时也可能带有 sender.tab，不能据此拒绝。
@@ -393,7 +419,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   else operation = serial(async () => {
     switch (message.type) {
       case 'status': return status();
-      case 'check': await check(true); return status();
+      case 'check': await check('manual'); return status();
       case 'save': await saveSettings(message.settings); return status();
       case 'issue-limit': return saveIssueLimit(message.limit);
       case 'test': return testNotification(message.kind, message.demo === true);
