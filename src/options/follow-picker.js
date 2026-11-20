@@ -6,6 +6,7 @@ export function createFollowPicker({ loadPage, confirm }) {
   const list = field('list');
   const search = field('search');
   const onlySelected = field('only-selected');
+  const bulkButtons = dialog.querySelectorAll('[data-selection]');
   const retry = field('retry');
   const tabs = {};
   let session;
@@ -73,7 +74,9 @@ export function createFollowPicker({ loadPage, confirm }) {
       row.append(avatar, name, input);
       fragment.append(row);
     }
-    if (!fragment.childElementCount) {
+    const hasRows = fragment.childElementCount > 0;
+    for (const button of bulkButtons) button.disabled = loading || !hasRows;
+    if (!hasRows) {
       const empty = document.createElement('p');
       empty.className = 'hint picker-empty';
       empty.textContent = loading ? '关注列表正在加载…' : error ? '当前没有可显示的匹配项。'
@@ -142,6 +145,20 @@ export function createFollowPicker({ loadPage, confirm }) {
   }
   search.addEventListener('input', () => renderList(true));
   onlySelected.addEventListener('change', () => renderList(true));
+  for (const button of bulkButtons) {
+    button.addEventListener('click', () => {
+      const selected = session.draft[session.kind];
+      const action = button.dataset.selection;
+      // 使用已经显示的筛选结果，包括列表中需要滚动才能看到的条目。
+      for (const input of list.querySelectorAll('input[data-uid]')) {
+        if (action === 'all' || (action === 'invert' && !input.checked)) selected.add(input.dataset.uid);
+        else selected.delete(input.dataset.uid);
+      }
+      renderSummary();
+      renderList();
+      if (button.disabled) onlySelected.focus();
+    });
+  }
   list.addEventListener('change', event => {
     const input = event.target;
     const uid = input.dataset.uid;

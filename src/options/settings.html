@@ -48,6 +48,12 @@
     <input id="picker-search" type="search" placeholder="搜索 UP 主昵称" aria-label="搜索 UP 主昵称" autofocus>
     <label class="toggle"><input id="picker-only-selected" type="checkbox">仅看已选</label>
   </div>
+  <div class="picker-bulk" role="group" aria-label="批量选择" aria-describedby="picker-bulk-hint">
+    <button class="secondary" type="button" data-selection="all" disabled>全选</button>
+    <button class="secondary" type="button" data-selection="invert" disabled>反选</button>
+    <button class="secondary" type="button" data-selection="none" disabled>全不选</button>
+    <span id="picker-bulk-hint" class="hint">仅作用于当前列表</span>
+  </div>
   <div id="picker-list" role="group" aria-label="UP 主列表"></div>
   <div class="picker-progress">
     <p id="picker-status" class="hint" role="status"></p>

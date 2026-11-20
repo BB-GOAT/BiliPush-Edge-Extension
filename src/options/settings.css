@@ -39,6 +39,10 @@
 .picker-tab[aria-pressed="true"] span { background: #f9dce6; }
 .picker-filters { display: flex; align-items: center; gap: 12px; }
 .picker-filters label { margin: 0; flex: none; }
+.picker-bulk { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.picker-bulk button { padding: 6px 11px; font-size: 13px; }
+.picker-bulk button:disabled { cursor: default; }
+.picker-bulk .hint { margin-left: 4px; }
 #picker-search { min-width: 0; flex: 1; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; color: inherit; font: inherit; }
 #picker-search:focus-visible { outline: 3px solid #589edc; outline-offset: 2px; }
 #picker-list { min-height: 0; flex: 1; overflow: auto; scrollbar-gutter: stable; }
