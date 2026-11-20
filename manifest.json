@@ -6,7 +6,8 @@
   "permissions": [
     "alarms",
     "storage",
-    "notifications"
+    "notifications",
+    "background"
   ],
   "host_permissions": [
     "https://api.bilibili.com/*"
