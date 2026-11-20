@@ -22,10 +22,6 @@ const postReady = (state, kind) => kind === 'video' ? state.baseline : state.dyn
 const quickType = settings => settings.rules.dynamic.mode !== 'off' ? 'all' : 'video';
 const feed = (type, offset = '') => api(`/x/polymer/web-dynamic/v1/feed/all?type=${type}&timezone_offset=-480`
   + (offset ? `&offset=${encodeURIComponent(offset)}` : ''));
-function feedHead(data) {
-  if (!Array.isArray(data?.items)) throw new CheckError('response', 'B 站返回的数据缺少动态列表。');
-  return data.items.map(item => dynamicFeedId(item) || videoFromItem(item)?.id).filter(Boolean);
-}
 const sourceErrors = (state, kinds) => kinds.filter(kind => state.sources[kind]?.error)
   .map(kind => `${KIND_LABELS[kind]}：${state.sources[kind].error}`).join('；');
 let queue = Promise.resolve();
@@ -157,8 +153,7 @@ async function scheduleQuick(settings, state, preserve = false) {
   const posts = enabledKinds(settings).filter(isPost);
   const quick = state.quick ??= {};
   const available = settings.enabled && settings.quickCheck && posts.length && !state.failures
-    && quick.type === quickType(settings) && posts.every(kind => postReady(state, kind))
-    && (Array.isArray(quick.head) || quick.cursor);
+    && quick.type === quickType(settings) && quick.cursor && posts.every(kind => postReady(state, kind));
   if (available) {
     const failures = state.globalIssues.quick?.failures ?? 0;
     const delay = Math.min(3600000, QUICK_INTERVAL * 2 ** Math.min(failures, 7));
@@ -221,16 +216,16 @@ async function scanKind(kind, settings, state, firstPage) {
   const video = kind === 'video';
   const ready = postReady(state, kind);
   const seen = video ? state.seen : state.dynamicSeen;
-  let head;
+  let cursor;
   const scan = await scanFeed(async offset => {
     const data = await (!offset && firstPage ? firstPage : feed(video ? 'video' : 'all', offset));
-    if (!offset && settings.quickCheck) head = feedHead(data);
+    if (!offset) cursor = numericId(data?.update_baseline);
     return data;
   }, ready ? seen : [], settings.maxPages,
     video ? videoFromItem : dynamicFromItem, video ? undefined : dynamicFeedId);
   const known = new Set(seen);
   return { ready, records: scan.items.filter(item => !known.has(item.id)), fresh: ready ? scan.fresh : [],
-    seen: [...new Set([...scan.seen, ...seen])].slice(0, 3000), gap: scan.gap, head };
+    seen: [...new Set([...scan.seen, ...seen])].slice(0, 3000), gap: scan.gap, cursor };
 }
 
 function recordScan(kind, result, state, settings) {
@@ -280,13 +275,11 @@ async function check(trigger, scheduledTime, context) {
   state.lastAttempt = startedAt;
   state.lastTrigger = trigger;
   let resetHistory = false;
-  let refreshedHead = false;
+  let refreshedCursor = false;
   let phase = 'account';
   try {
     const account = await currentAccount();
     const mid = String(account.mid);
-    // 快查先读取首页。若期间换号，重新读取当前账号的列表，避免串用首页。
-    const firstPage = state.account === mid ? context?.firstPage : null;
     if (state.account !== mid) {
       resetHistory = Boolean(state.account);
       const globalIssues = resetHistory ? {} : state.globalIssues;
@@ -302,19 +295,17 @@ async function check(trigger, scheduledTime, context) {
     const due = targets.filter(kind => manual || !(state.sources[kind]?.retryAt > Date.now()));
     const type = quickType(settings);
     const anchor = type === 'all' ? 'dynamic' : 'video';
-    const dynamicFirst = settings.quickCheck && due.includes('dynamic') && due.includes('video')
-      ? Promise.resolve(firstPage ?? feed('all')) : null;
+    const dynamicFirst = settings.quickCheck && due.includes('dynamic') && due.includes('video') ? feed('all') : null;
     const scans = await Promise.allSettled(due.map(async kind => {
-      // 先取得全部动态首页，再读投稿，确保提交首页时已读取其中可能出现的新投稿。
+      // 先取得全部动态的基线，再读投稿，避免基线跨过投稿请求取不到的新内容。
       if (kind === 'video' && dynamicFirst) await dynamicFirst.catch(() => {});
-      return scanKind(kind, settings, state, kind === anchor ? firstPage ?? dynamicFirst : null);
+      return scanKind(kind, settings, state, kind === 'dynamic' ? dynamicFirst : null);
     }));
     if (settings.quickCheck && due.includes(anchor) && kinds.filter(isPost).every(kind =>
       scans[due.indexOf(kind)]?.status === 'fulfilled')) {
-      const head = scans[due.indexOf(anchor)].value.head;
-      state.quick = { ...state.quick, type, head };
-      delete state.quick.cursor;
-      refreshedHead = true;
+      const cursor = scans[due.indexOf(anchor)].value.cursor;
+      state.quick = { ...state.quick, type, cursor };
+      refreshedCursor = true;
     }
     const records = [];
     let liveChecked = false;
@@ -358,9 +349,9 @@ async function check(trigger, scheduledTime, context) {
     state.error = issue.message;
     await badge('!');
   }
-  const reset = state.failures ? undefined : trigger === 'quick' && !refreshedHead ? [] : checkedLanes;
+  const reset = state.failures ? undefined : trigger === 'quick' && !refreshedCursor ? [] : checkedLanes;
   await schedule(settings, state, reset);
-  await scheduleQuick(settings, state, trigger !== 'quick' && (!refreshedHead || Boolean(state.globalIssues.quick)));
+  await scheduleQuick(settings, state, trigger !== 'quick' && (!refreshedCursor || Boolean(state.globalIssues.quick)));
   await chrome.storage.local.set({ state });
   if (events.length || resetHistory) await updateIssueHistory(settings.issueLimit, state.diagnosticScope, events);
 }
@@ -369,31 +360,28 @@ async function checkQuick(scheduledTime) {
   const { settings, state } = await read();
   const quick = state.quick;
   if (!settings.enabled || !settings.quickCheck || !quick?.next || scheduledTime < quick.next) return;
-  // 完整检查也到期时，由它读取并更新首页，避免重复请求。
+  // 完整检查也到期时，由它拉取列表并更新基线，省去一次计数请求。
   const deadline = Math.max(Date.now(), scheduledTime);
   if (state.plan.content != null && state.plan.content <= deadline) {
     await check('alarm', deadline);
     return;
   }
   const events = [];
-  let firstPage;
-  let changed = false;
+  let count = 0;
   let issue = null;
-  const hasHead = Array.isArray(quick.head);
   try {
-    firstPage = await feed(quick.type);
-    const head = feedHead(firstPage);
-    const known = new Set(quick.head);
-    // 旧版本只保存了计数游标，第一次照常检查并建立首页记录。
-    changed = !hasHead || head.some(id => !known.has(id));
+    const query = new URLSearchParams({ type: quick.type, update_baseline: quick.cursor });
+    const data = await api(`/x/polymer/web-dynamic/v1/feed/all/update?${query}`);
+    if (!Number.isSafeInteger(data?.update_num) || data.update_num < 0) {
+      throw new CheckError('response', 'B 站没有返回有效的新动态数量。');
+    }
+    count = data.update_num;
   } catch (error) {
     issue = describeIssue(error, { category: 'check', message: '快速检查发生异常。', code: null });
   }
-  quick.lastAt = Date.now();
-  quick.result = issue ? 'error' : !hasHead ? 'first' : changed ? 'changed' : 'unchanged';
   setGlobalIssue(state, events, 'quick', issue);
-  if (changed) {
-    await check('quick', undefined, { settings, state, events, firstPage });
+  if (count > 0) {
+    await check('quick', undefined, { settings, state, events });
     return;
   }
   await scheduleQuick(settings, state);

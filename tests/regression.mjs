@@ -99,9 +99,10 @@ let dynamicError;
 let unavailableSession = false;
 let liveCalls = 0;
 let accountCalls = 0;
-let videoError;
-let nextFeedStatus = 0;
-let nextFeedItems;
+let updateBaseline;
+let updateNum = 0;
+let updateStatus = 0;
+const probeCalls = [];
 const feedCalls = [];
 const followingCalls = [];
 const followingPages = new Map();
@@ -190,29 +191,19 @@ globalThis.chrome = {
 };
 globalThis.fetch = async (url, options) => {
   const parsed = new URL(url);
-  const type = parsed.searchParams.get('type');
-  if (parsed.pathname.endsWith('/feed/all')) {
+  if (parsed.pathname.endsWith('/feed/all/update')) {
     assert.equal(options.credentials, 'include');
-    feedCalls.push(type);
-    if (nextFeedStatus) {
-      const status = nextFeedStatus;
-      nextFeedStatus = 0;
-      return { ok: false, status };
-    }
-    if (nextFeedItems) {
-      const items = nextFeedItems;
-      nextFeedItems = undefined;
-      return { ok: true, async json() { return { code: 0, data: { items, has_more: false } }; } };
-    }
+    probeCalls.push(Object.fromEntries(parsed.searchParams));
+    if (updateStatus) return { ok: false, status: updateStatus };
+    return { ok: true, async json() { return { code: 0, data: { update_num: updateNum } }; } };
   }
-  assert.equal(parsed.pathname.endsWith('/feed/all/update'), false, '快查应读取首页');
+  if (parsed.pathname.endsWith('/feed/all')) feedCalls.push(parsed.searchParams.get('type'));
   if (parsed.pathname === '/x/web-interface/nav') accountCalls++;
   if (parsed.hostname === 'api.live.bilibili.com') {
     liveCalls++;
     if (liveHttpStatus) return { ok: false, status: liveHttpStatus };
   }
-  if (type === 'all' && dynamicError) throw dynamicError;
-  if (type === 'video' && videoError) throw videoError;
+  if (parsed.searchParams.get('type') === 'all' && dynamicError) throw dynamicError;
   return {
     ok: true,
     async json() {
@@ -238,7 +229,8 @@ globalThis.fetch = async (url, options) => {
       }
       return { code: 0, data: parsed.pathname.endsWith('/nav')
         ? { isLogin: true, mid, uname: '测试账号' }
-        : { items: type === 'all' ? [...dynamics, ...feed] : feed, has_more: false, update_num: 0 } };
+        : { items: parsed.searchParams.get('type') === 'all' ? [...dynamics, ...feed] : feed,
+          has_more: false, update_baseline: updateBaseline } };
     }
   };
 };
@@ -722,6 +714,7 @@ await message('check');
 store.settings = { ...store.settings, interval: 3, rules: quickRules };
 delete store.settings.quickCheck;
 delete store.settings.fullInterval;
+updateBaseline = '900000000000000123';
 chrome.runtime.onInstalled.listener();
 let quickState = (await message('status')).state;
 equal(store.settings.quickCheck, true);
@@ -736,15 +729,14 @@ const quietFeedCalls = feedCalls.length;
 const quietAccountCalls = accountCalls;
 const quietLiveCalls = liveCalls;
 quickState = (await tick(quickAlarm)).state;
-equal(feedCalls.slice(quietFeedCalls), ['all']);
+equal(probeCalls.at(-1), { type: 'all', update_baseline: '900000000000000123' });
+equal(feedCalls.length, quietFeedCalls);
 equal(accountCalls, quietAccountCalls);
 equal(liveCalls, quietLiveCalls);
 equal(quickState.lastAttempt, initialQuickAttempt);
-equal(quickState.quick.result, 'unchanged');
-equal(quickState.quick.lastAt, clock);
 equal(quickState.plan, { content: initialContentPlan, live: initialLivePlan });
 
-// 重新唤醒时找回快查闹钟，但不提前跑常规检查。
+// 重新唤醒时找回计数闹钟，但不提前跑常规检查。
 const quickDeadline = quickState.quick.next;
 alarms.delete(quickAlarm);
 chrome.runtime.onStartup.listener();
@@ -753,57 +745,53 @@ equal(alarms.get(quickAlarm).scheduledTime, quickDeadline);
 equal(accountCalls, quietAccountCalls);
 
 const beforeQuickNotify = sent.length;
+updateNum = 2;
+updateBaseline = '900000000000000456';
 feed = [item(70), ...feed];
 dynamics = [dynamic(5001), ...dynamics];
 quickState = (await tick(quickAlarm)).state;
 equal(quickState.lastTrigger, 'quick');
-equal(quickState.quick.result, 'changed');
-equal(quickState.quick.head.includes('7001'), true);
-equal(quickState.quick.head.includes('1070'), true);
-equal(feedCalls.slice(quietFeedCalls), ['all', 'all', 'video']);
+equal(quickState.quick.cursor, updateBaseline);
+equal(feedCalls.slice(quietFeedCalls), ['all', 'video']);
 equal(sent.slice(beforeQuickNotify).map(entry => entry.id).sort(), ['dynamic:7001', 'video:BV0000000070']);
 equal(liveCalls, quietLiveCalls);
 equal(quickState.plan.live, initialLivePlan);
 equal(quickState.plan.content - clock, 15 * 60000);
 
-// 只重排旧条目不触发重复通知。同一轮一类失败时不推进共同首页。
-const afterQuickFeeds = feedCalls.length;
-dynamics.reverse();
+// 数量偶尔仍大于零也不会重复发送。同一轮一类失败时不推进共同基线。
+updateBaseline = '900000000000000457';
+dynamicError = new Error('模拟动态请求失败');
 quickState = (await tick(quickAlarm)).state;
-equal(quickState.quick.result, 'unchanged');
-equal(feedCalls.slice(afterQuickFeeds), ['all']);
+equal(quickState.quick.cursor, '900000000000000456');
+equal(quickState.quick.next, quickState.sources.dynamic.retryAt);
 equal(sent.length, beforeQuickNotify + 2);
-const priorHead = quickState.quick.head;
-feed = [item(71), ...feed];
-videoError = new Error('模拟投稿请求失败');
-quickState = (await tick(quickAlarm)).state;
-equal(quickState.quick.head, priorHead);
-equal(quickState.quick.next, quickState.sources.video.retryAt);
-equal(sent.length, beforeQuickNotify + 2);
-videoError = undefined;
+dynamicError = undefined;
 
-// 直播仍按设置独立检查，快查限流时完整扫描仍能找回新内容。
+// 直播仍按设置独立检查，计数限流时完整扫描仍能找回新内容。
 const beforeLiveOnly = feedCalls.length;
 quickState = (await tick('check-videos')).state;
 equal(feedCalls.length, beforeLiveOnly);
 equal(liveCalls, quietLiveCalls + 1);
-nextFeedStatus = 429;
+updateStatus = 429;
 let result = await tick(quickAlarm);
 quickState = result.state;
 equal(quickState.quick.next - clock, 60000);
 equal(quickState.globalIssues.quick.code, 'HTTP 429');
-equal(quickState.quick.result, 'error');
 equal(result.diagnostics.entries[0].source, 'quick');
-equal(feedCalls.slice(beforeLiveOnly), ['all']);
+equal(feedCalls.length, beforeLiveOnly);
 
 const fallbackAt = quickState.plan.content;
-const beforeFallback = feedCalls.length;
+const beforeFallback = probeCalls.length;
+feed = [item(71), ...feed];
+updateBaseline = '900000000000000458';
 result = await tick('check-videos', fallbackAt);
 equal(result.state.lastTrigger, 'alarm');
-equal(result.state.quick.head.includes('1071'), true);
+equal(result.state.quick.cursor, updateBaseline);
 equal(sent.at(-1).id, 'video:BV0000000071');
-equal(feedCalls.slice(beforeFallback), ['all', 'video']);
+equal(probeCalls.length, beforeFallback);
 equal(result.state.quick.next, quickState.quick.next);
+updateStatus = 0;
+updateNum = 0;
 result = await tick(quickAlarm);
 equal(result.state.globalIssues.quick, undefined);
 equal(result.diagnostics.entries[0].source, 'quick');
@@ -812,61 +800,40 @@ equal(result.diagnostics.entries[0].issue, null);
 // 快查事件在补查时间之后才投递时，仅运行一次补查，随后忽略旧定时事件。
 const staleFull = alarms.get('check-videos');
 const beforeBothDue = accountCalls;
+const beforeBothDueProbes = probeCalls.length;
 const beforeBothDueFeeds = feedCalls.length;
 result = await tick(quickAlarm, result.state.plan.content);
 chrome.alarms.onAlarm.listener({ name: 'check-videos', ...staleFull });
 await message('status');
 equal(result.state.lastTrigger, 'alarm');
 equal(accountCalls, beforeBothDue + 1);
+equal(probeCalls.length, beforeBothDueProbes);
 equal(feedCalls.slice(beforeBothDueFeeds), ['all', 'video']);
 
-// 请求首页后发现账号切换，丢弃已经读到的首页，重新建立新账号的基线。
+// 旧账号的计数只用作提示。发现当前账号变更后重建其基线，不发送现有内容。
 const beforeQuickAccount = sent.length;
 mid = '999';
-nextFeedItems = [dynamic(6000)];
+updateNum = 1;
+updateBaseline = '900000000000000459';
 result = await tick(quickAlarm);
 equal(result.state.account, '999');
-equal(result.state.quick.head.includes('8000'), false);
-equal(result.state.history.some(entry => entry.id === '8000'), false);
+equal(result.state.quick.cursor, updateBaseline);
 equal(result.state.history.every(entry => entry.detected === clock), true);
 equal(sent.length, beforeQuickAccount);
+updateNum = 0;
 
-// 旧版只保存计数游标时，从一次正常检查中补齐首页记录。
-store.state.quick.cursor = '900000000000000123';
-delete store.state.quick.head;
-const beforeUpgrade = sent.length;
-result = await tick(quickAlarm);
-equal(result.state.quick.cursor, undefined);
-equal(result.state.quick.head.includes('1071'), true);
-equal(result.state.quick.result, 'first');
-equal(sent.length, beforeUpgrade);
-
-// 只开动态且首页起初为空时，第一条新动态仍可由快查检出。
-await message('save', { settings: { quickCheck: true, mode: 'off', rules: { dynamic: { mode: 'all' } } } });
-feed = [];
-dynamics = [];
-result = await message('check');
-equal(result.state.quick.head, []);
-const beforeDynamicOnly = feedCalls.length;
-dynamics = [dynamic(6001)];
-result = await tick(quickAlarm);
-equal(result.state.quick.head, ['8001']);
-equal(feedCalls.slice(beforeDynamicOnly), ['all']);
-equal(sent.at(-1).id, 'dynamic:8001');
-
-// 仅开投稿时只读投稿首页。暂停后两个闹钟均取消。
+// 仅开投稿时使用投稿流游标。暂停后两个闹钟均取消。
 await message('save', { settings: { quickCheck: true, mode: 'all' } });
 await message('check');
-const beforeVideoOnly = feedCalls.length;
 result = await tick(quickAlarm);
-equal(feedCalls.slice(beforeVideoOnly), ['video']);
+equal(probeCalls.at(-1), { type: 'video', update_baseline: updateBaseline });
 const staleQuick = alarms.get(quickAlarm);
-const beforePause = feedCalls.length;
+const beforePause = probeCalls.length;
 await message('save', { settings: { quickCheck: true, enabled: false, mode: 'all' } });
 equal(alarms.size, 0);
 chrome.alarms.onAlarm.listener({ name: quickAlarm, ...staleQuick });
 await message('status');
-equal(feedCalls.length, beforePause);
+equal(probeCalls.length, beforePause);
 await message('save', { settings: { quickCheck: false, enabled: true, interval: 3, mode: 'all' } });
 equal(alarms.has(quickAlarm), false);
 equal(store.state.plan.content - clock, 3 * 60000);
