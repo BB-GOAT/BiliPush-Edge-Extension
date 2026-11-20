@@ -1,7 +1,20 @@
+import { KINDS, KIND_LABELS, LIVE_PERMISSION, itemUrl } from '../core.js';
+
 const $ = id => document.getElementById(id);
 let busy = false;
 let loaded = false;
 const time = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
+const ruleFields = {};
+for (const kind of KINDS) {
+  const group = $('rule-template').content.cloneNode(true);
+  group.querySelector('legend').textContent = KIND_LABELS[kind];
+  const mode = group.querySelector('select');
+  const uids = group.querySelector('textarea');
+  const sync = () => { uids.parentElement.hidden = mode.value !== 'selected'; };
+  mode.addEventListener('change', sync);
+  ruleFields[kind] = { mode, uids, sync };
+  $('rules').append(group);
+}
 async function send(type, data = {}) {
   const response = await chrome.runtime.sendMessage({ type, ...data });
   if (response?.error) throw new Error(response.error);
@@ -10,77 +23,93 @@ async function send(type, data = {}) {
 }
 function render({ settings, state }, fill = false) {
   if (fill) {
-    for (const key of ['interval', 'maxPages', 'mode']) $(key).value = settings[key];
+    for (const key of ['interval', 'maxPages']) $(key).value = settings[key];
     for (const key of ['enabled', 'silent']) $(key).checked = settings[key];
-    $('uids').value = settings.uids.join('\n');
-    $('uids-field').hidden = settings.mode !== 'selected';
+    for (const kind of KINDS) {
+      const { mode, uids, sync } = ruleFields[kind];
+      mode.value = settings.rules[kind].mode;
+      uids.value = settings.rules[kind].uids.join('\n');
+      sync();
+    }
     loaded = true;
   }
-  $('badge').textContent = !settings.enabled ? '已暂停' : state.error ? '需要检查' : state.baseline ? '自动检查中' : '等待首次检查';
+  const hasRules = KINDS.some(kind => settings.rules[kind].mode !== 'off');
+  $('badge').textContent = !settings.enabled ? '已暂停' : !hasRules ? '全部关闭' : state.error ? '需要检查'
+    : state.lastSuccess ? '自动检查中' : '等待首次检查';
   $('account').textContent = state.account ? `${state.accountName}（${state.account}）` : '尚未确认登录';
   $('attempt').textContent = time(state.lastAttempt);
   $('success').textContent = time(state.lastSuccess);
-  $('next').textContent = settings.enabled ? time(state.nextCheck) : '已暂停';
-  $('note').textContent = state.note ?? '点击“立即检查”确认登录，并建立视频基线。';
-  $('error').hidden = !state.error;
+  $('next').textContent = settings.enabled && hasRules ? time(state.nextCheck) : '—';
+  $('note').textContent = hasRules ? (state.note || '点击“立即检查”确认登录并读取已开启的提醒。') : '请先选择要接收的提醒。';
+  $('error').hidden = !state.error || !hasRules;
   $('error').textContent = state.error ?? '';
   $('history').replaceChildren();
   if (!state.history.length) $('history').textContent = '暂无记录。';
-  for (const video of state.history) {
+  for (const record of state.history) {
+    const kind = record.kind ?? 'video';
+    const url = itemUrl(kind, record.id);
+    if (!url) continue;
     const link = document.createElement('a');
     link.className = 'video';
-    // 链接仅由已验证的 BV 号构造，不使用接口中的任意 URL。
-    if (!/^BV[A-Za-z0-9]{10}$/.test(video.id)) continue;
-    link.href = `https://www.bilibili.com/video/${video.id}/`;
+    link.href = url;
     link.target = '_blank';
     link.rel = 'noreferrer';
     const title = document.createElement('strong');
-    title.textContent = video.title;
+    title.textContent = record.title;
     const info = document.createElement('span');
-    info.textContent = `${video.author} · UID ${video.uid} · ${video.published ? '发布于 ' + time(video.published * 1000) : '检测于 ' + time(video.detected)}`;
+    info.textContent = `${KIND_LABELS[kind]} · ${record.author} · UID ${record.uid} · ${record.published
+      ? '发布于 ' + time(record.published * 1000) : '检测于 ' + time(record.detected)}`;
     link.append(title, info);
     $('history').append(link);
   }
 }
-async function action(button, task) {
+async function action(button, feedback, task) {
   if (busy) return;
   busy = true;
   const old = button.textContent;
   document.querySelectorAll('button').forEach(node => node.disabled = true);
   button.textContent = '处理中…';
-  $('feedback').textContent = '';
+  $(feedback).textContent = '';
   try { await task(); }
-  catch (error) { $('feedback').textContent = error.message; }
+  catch (error) { $(feedback).textContent = error.message; }
   finally {
     busy = false;
     document.querySelectorAll('button').forEach(node => node.disabled = false);
     button.textContent = old;
   }
 }
-$('mode').addEventListener('change', () => { $('uids-field').hidden = $('mode').value !== 'selected'; });
 $('settings').addEventListener('submit', event => {
   event.preventDefault();
   if (!loaded) return;
-  void action(event.submitter, async () => {
-    const uids = $('uids').value.split(/[\s,，;；]+/).filter(Boolean);
-    if (uids.some(uid => !/^\d{1,20}$/.test(uid))) throw new Error('UID 只能包含数字，请检查输入。');
-    if ($('mode').value === 'selected' && !uids.length) throw new Error('请至少填写一个 UP 主 UID。');
-    const result = await send('save', { settings: {
+  void action(event.submitter, 'feedback', async () => {
+    const rules = {};
+    for (const kind of KINDS) {
+      const { mode, uids: input } = ruleFields[kind];
+      const uids = input.value.split(/[\s,，;；]+/).filter(Boolean);
+      if (mode.value === 'selected' && (!uids.length || uids.some(uid => !/^[1-9]\d{0,19}$/.test(uid)))) {
+        throw new Error(`${KIND_LABELS[kind]}：请填写至少一个有效的 UP 主 UID。`);
+      }
+      rules[kind] = { mode: mode.value, uids };
+    }
+    const settings = {
       enabled: $('enabled').checked, silent: $('silent').checked,
-      interval: Number($('interval').value), maxPages: Number($('maxPages').value),
-      mode: $('mode').value, uids
-    } });
+      interval: Number($('interval').value), maxPages: Number($('maxPages').value), rules
+    };
+    // 权限申请必须从「保存设置」的用户操作直接发起。
+    if (rules.live.mode !== 'off' && !await chrome.permissions.request(LIVE_PERMISSION)) {
+      throw new Error('直播提醒需要访问 B站直播接口。可允许访问，或关闭直播提醒后保存。');
+    }
+    const result = await send('save', { settings });
     render(result, true);
     $('feedback').textContent = '设置已保存。';
   });
 });
-$('check').addEventListener('click', () => { void action($('check'), async () => {
+$('check').addEventListener('click', () => { void action($('check'), 'check-feedback', async () => {
   render(await send('check'));
-  $('feedback').textContent = '检查已结束，请查看运行状态。';
 }); });
-$('test').addEventListener('click', () => { void action($('test'), async () => {
-  await send('test');
-  $('feedback').textContent = '已请求发送测试通知；如未显示，请检查 Windows 和 Edge 通知权限。';
+$('test').addEventListener('click', () => { void action($('test'), 'check-feedback', async () => {
+  const { title } = await send('test');
+  $('check-feedback').textContent = `已发送测试通知《${title}》。点击横幅可打开视频。`;
 }); });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.state && loaded) void send('status').then(result => render(result)).catch(() => {});

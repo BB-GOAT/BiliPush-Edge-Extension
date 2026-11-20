@@ -13,6 +13,7 @@ function equal(actual, expected) {
 // 所有账号与视频编号均为虚构数据。
 function item(number, uid = '10') {
   return {
+    id_str: String(number + 1000),
     type: 'DYNAMIC_TYPE_AV',
     modules: {
       module_author: { mid: uid, name: '测试UP', pub_ts: 100 + number },
@@ -22,11 +23,22 @@ function item(number, uid = '10') {
     }
   };
 }
+function dynamic(number, uid = '20', type = 'DYNAMIC_TYPE_WORD') {
+  return { id_str: String(number + 2000), type, modules: {
+    module_author: { mid: uid, name: '动态作者', pub_ts: 200 + number },
+    module_dynamic: { desc: { text: `动态 ${number}` } }
+  } };
+}
+function room(number, uid = '30', status = 1) {
+  return { room_id: number + 3000, uid, live_status: status, uname: '主播', title: `直播 ${number}` };
+}
 
 // 设置边界、原创投稿与分页。
 equal(normalizeSettings({ interval: 0 }).interval, 1);
 equal(normalizeSettings({ maxPages: 99 }).maxPages, 10);
-equal(normalizeSettings({ uids: ['10', 'abc', '10'] }).uids, ['10']);
+equal(normalizeSettings({ mode: 'selected', uids: ['10', 'abc', '10'] }).rules, {
+  video: { mode: 'selected', uids: ['10'] }, dynamic: { mode: 'off', uids: [] }, live: { mode: 'off', uids: [] }
+});
 equal(videoFromItem({ ...item(1), type: 'DYNAMIC_TYPE_FORWARD' }), null);
 equal(videoFromItem({ type: 'DYNAMIC_TYPE_AV' }), null);
 
@@ -52,7 +64,7 @@ await assert.rejects(scanFeed(async () => ({}), ['x'], 3));
 checks++;
 
 // 后台集成模拟：存储、定时任务、通知、消息与 B站响应均留在本进程。
-const store = {};
+const store = { settings: { mode: 'all', uids: ['77'] } };
 const alarms = new Map();
 const sent = [];
 const activeNotifications = new Map();
@@ -61,7 +73,12 @@ const opened = [];
 let notificationFail = false;
 let mid = '100';
 let feed = [item(1)];
+let dynamics = [];
+let rooms = [];
 let apiFailure = false;
+let missingLivePermission = false;
+let liveFailure = false;
+let liveCalls = 0;
 const event = () => ({ addListener(listener) { this.listener = listener; } });
 
 globalThis.chrome = {
@@ -105,6 +122,12 @@ globalThis.chrome = {
     onClicked: event()
   },
   tabs: { async create(options) { opened.push(options); } },
+  permissions: {
+    async contains({ origins }) {
+      equal(origins, ['https://api.live.bilibili.com/*']);
+      return !missingLivePermission;
+    }
+  },
   runtime: {
     id: 'test-extension',
     getURL: relative => `chrome-extension://test-extension/${relative}`,
@@ -114,18 +137,22 @@ globalThis.chrome = {
     async openOptionsPage() { opened.push('options'); }
   }
 };
-globalThis.fetch = async url => ({
-  ok: true,
-  async json() {
-    if (apiFailure) return { code: -101 };
-    return {
-      code: 0,
-      data: url.includes('/nav')
+globalThis.fetch = async url => {
+  const parsed = new URL(url);
+  if (parsed.hostname === 'api.live.bilibili.com') liveCalls++;
+  return {
+    ok: true,
+    async json() {
+      if (apiFailure) return { code: -101 };
+      if (parsed.hostname === 'api.live.bilibili.com') {
+        return liveFailure ? { code: -412 } : { code: 0, data: { rooms } };
+      }
+      return { code: 0, data: parsed.pathname.endsWith('/nav')
         ? { isLogin: true, mid, uname: '测试账号' }
-        : { items: feed, has_more: false }
-    };
-  }
-});
+        : { items: parsed.searchParams.get('type') === 'all' ? [...dynamics, ...feed] : feed, has_more: false } };
+    }
+  };
+};
 await import(new URL('src/background.js', root));
 
 function request(message, sender = {
@@ -141,13 +168,15 @@ function request(message, sender = {
 }
 const message = (type, extra = {}) => request({ type, ...extra });
 
-// 首次基线、真实新投稿与重复查询。
+// 首次基线、定时新投稿与重复查询。
 await message('check');
+equal(store.settings.rules.video, { mode: 'all', uids: ['77'] });
 equal(store.state.baseline, true);
 equal(sent.length, 0);
 equal(store.state.account, '100');
 feed = [item(2), item(1)];
-await message('check');
+chrome.alarms.onAlarm.listener({ name: 'check-videos' });
+await message('status');
 equal(sent.length, 1);
 equal(sent[0].id, 'video:BV0000000002');
 await message('check');
@@ -204,9 +233,13 @@ equal(sent.filter(notification => notification.id === 'video:BV0000000006').leng
 
 // 连续点击均创建新通知，清理旧测试提醒但保留真实视频通知。
 activeNotifications.set('test', { message: '旧版测试通知' });
-await message('test');
+const beforeTest = structuredClone(store);
+feed = [item(6), item(7), ...feed.slice(1)];
+equal(await message('test'), { title: '视频 7' });
 const firstTest = sent.at(-1).id;
-equal(firstTest.startsWith('test:'), true);
+equal(firstTest.startsWith('test:BV0000000007:'), true);
+equal(sent.at(-1).title, '【测试】测试UP 投稿了新视频');
+equal(sent.at(-1).message, '视频 7');
 equal(cleared.includes('test'), true);
 await message('test');
 const secondTest = sent.at(-1).id;
@@ -215,9 +248,101 @@ equal(activeNotifications.has(firstTest), false);
 equal(activeNotifications.has(secondTest), true);
 equal(activeNotifications.has('video:BV0000000006'), true);
 chrome.notifications.onClicked.listener(secondTest);
-equal(opened.includes('options'), true);
+equal(opened.at(-1).url, 'https://www.bilibili.com/video/BV0000000007/');
 chrome.notifications.onClicked.listener('video:BV0000000006');
 equal(opened.at(-1).url, 'https://www.bilibili.com/video/BV0000000006/');
+equal(store, beforeTest);
+equal(liveCalls, 0);
+
+// 新增类别各自建立基线，不能改写已保存的投稿进度。
+const rules = {
+  video: { mode: 'selected', uids: ['10'] },
+  dynamic: { mode: 'selected', uids: ['20'] },
+  live: { mode: 'selected', uids: ['30'] }
+};
+feed = feed.filter(video => video.id_str !== '1007');
+dynamics = [dynamic(1)];
+rooms = [room(1)];
+await message('save', { settings: { interval: 7, rules } });
+const sentBeforeNewKinds = sent.length;
+await message('check');
+equal(sent.length, sentBeforeNewKinds);
+equal(store.state.seen.includes('BV0000000006'), true);
+equal(store.state.dynamicSeen.includes('2001'), true);
+equal(store.state.liveRooms, ['3001']);
+
+// 各类别只按自己的 UID 过滤，视频和直播推荐不会再触发动态提醒。
+feed = [item(8, '20'), item(9), ...feed];
+dynamics = [dynamic(2, '20', 'DYNAMIC_TYPE_DRAW'), dynamic(3, '30'),
+  dynamic(4, '20', 'DYNAMIC_TYPE_LIVE_RCMD'), dynamic(5, '20', 'DYNAMIC_TYPE_FORWARD'), ...dynamics];
+rooms = [room(1), room(2), room(3, '20'), room(4, '30', 2)];
+await message('check');
+equal(sent.slice(sentBeforeNewKinds).map(entry => entry.id.replace(/^(live:\d+):.+$/, '$1')),
+  ['video:BV0000000009', 'dynamic:2002', 'dynamic:2005', 'live:3002']);
+const firstLive = sent.at(-1).id;
+chrome.notifications.onClicked.listener('dynamic:2002');
+equal(opened.at(-1).url, 'https://t.bilibili.com/2002');
+chrome.notifications.onClicked.listener(firstLive);
+equal(opened.at(-1).url, 'https://live.bilibili.com/3002');
+
+// 持续直播只提醒一次，关播后再次开播可以产生新横幅。
+await message('check');
+equal(sent.length, sentBeforeNewKinds + 4);
+rooms = [room(1)];
+await message('check');
+rooms = [room(1), room(2)];
+await message('check');
+equal(sent.at(-1).id.startsWith('live:3002:'), true);
+equal(sent.at(-1).id !== firstLive, true);
+
+// 部分接口与权限失败时，投稿仍然可发，失败不会覆盖直播快照。
+liveFailure = true;
+feed = [item(10), ...feed];
+await message('check');
+equal(sent.at(-1).id, 'video:BV0000000010');
+equal(store.state.error.includes('直播开播'), true);
+equal(store.state.liveRooms, ['3001', '3002']);
+liveFailure = false;
+const beforeRetry = liveCalls;
+chrome.alarms.onAlarm.listener({ name: 'check-videos' });
+await message('status');
+equal(liveCalls, beforeRetry);
+missingLivePermission = true;
+await message('check');
+equal(liveCalls, beforeRetry);
+equal(store.state.error.includes('允许访问 B站直播接口'), true);
+missingLivePermission = false;
+await message('check');
+equal(store.state.error, '');
+
+// 关闭再开启只重新建立对应类别的基线。
+await message('save', { settings: { rules: { ...rules, live: { mode: 'off' } } } });
+equal(store.state.liveRooms, null);
+equal(store.state.dynamicBaseline, true);
+rooms = [room(7)];
+await message('save', { settings: { rules } });
+const beforeReenable = sent.length;
+await message('check');
+equal(store.state.liveRooms, ['3007']);
+equal(sent.length, beforeReenable);
+
+// 开播提醒发送失败后，直播列表暂时不可用也不阻塞新的投稿。
+rooms = [room(8)];
+notificationFail = true;
+await message('check');
+equal(store.state.pending.map(entry => entry.kind), ['live']);
+notificationFail = false;
+liveFailure = true;
+feed = [item(11), ...feed];
+await message('check');
+equal(sent.at(-1).id, 'video:BV0000000011');
+equal(store.state.pending.map(entry => entry.kind), ['live']);
+liveFailure = false;
+rooms = [];
+const beforeEnded = sent.length;
+await message('check');
+equal(store.state.pending.length, 0);
+equal(sent.length, beforeEnded);
 
 // 设置页无 tab、携带查询/锚点时同样合法；相似地址与其他来源不能操作后台。
 equal((await request({ type: 'status' }, {
@@ -252,4 +377,4 @@ for (const file of [
 ]) await fs.access(new URL(file, root));
 equal(manifest.manifest_version, 3);
 equal(manifest.permissions.includes('cookies'), false);
-console.log(`PASS: ${checks} assertions; baseline, pagination, deduplication, account switch, settings, pause, backoff, outbox recovery, repeat notifications and message trust.`);
+console.log(`PASS: ${checks} 项断言，覆盖定时投稿、动态、开播、独立范围、基线、退避、通知、图标和消息校验。`);

@@ -4,9 +4,9 @@
 
 `manifest.json` 加载 `src/background.js` 模块后台。后台导入 `src/core.js`；工具栏按钮通过 `openOptionsPage` 打开 `src/options/settings.html`，该页面只通过消息请求后台，不直接访问 B站接口。
 
-后台访问 `/x/web-interface/nav` 确认登录账号，然后访问 `/x/polymer/web-dynamic/v1/feed/all?type=video&timezone_offset=-480`，用 `offset` 翻页。请求自动携带浏览器凭据，20 秒超时。接口不是稳定开放契约；改变请求字段或处理方式前须保留脱敏样例并实测。
+后台访问 `/x/web-interface/nav` 确认登录账号。视频与普通动态分别读取 `/x/polymer/web-dynamic/v1/feed/all` 的 `type=video` 和 `type=all`，用 `offset` 翻页。启用直播并取得可选权限后，后台访问 `api.live.bilibili.com/xlive/web-ucenter/v1/xfetter/GetWebList?hit_ab=true` 获取已关注的开播房间。请求自动携带浏览器凭据，20 秒超时。这些接口可能变化，修改时需要脱敏样例和实测。
 
-`core.js` 提取原创视频动态，以 BV 号去重；遇到已有 BV 号、没有下一页或页数上限时停止。首次只用首页建立基线。账号 mid 改变时重建账号状态。筛选使用 UID，不用昵称。
+`core.js` 分别解析原创视频、普通动态和直播。以 BV 号和动态 ID 识别已检查内容，遇到上次记录、没有下一页或页数上限时停止。普通动态使用整条关注流的动态 ID 衔接分页，即使页面只有视频也能记录进度。直播按房间 ID 对比两次成功快照，只处理直播中的条目。账号 mid 改变时全部重建基线，各类提醒分别按 UID 筛选。
 
 ## 存储
 
@@ -15,16 +15,18 @@
 | 字段 | 含义及约束 |
 | --- | --- |
 | settings.enabled / interval | 自动检查开关；间隔 1～60 分钟 |
-| settings.mode / uids | 全部关注或 UID 白名单；UID 为字符串 |
+| settings.rules | `video`、`dynamic`、`live` 各自有 `mode`（`all`、`selected`、`off`）和字符串 UID 列表。升级时读取旧 `mode` / `uids` 作为 `video` |
 | settings.silent / maxPages | 静音；最大页数 1～10 |
 | state.account / accountName | 当前账号 UID 与昵称，用于账号隔离和面板显示 |
 | state.seen / baseline | 最近最多 3000 个 BV 号；是否已建立基线 |
-| state.pending | 尚未确认发送完成的视频通知队列 |
-| state.history | 最近最多 100 条检测记录，包含基线视频 |
+| state.dynamicSeen / dynamicBaseline | 普通动态已扫过的关注流 ID，最多 3000 个；是否已建立动态基线 |
+| state.liveRooms | 最近一次成功查询的开播房间 ID；`null` 表示尚未建立基线 |
+| state.sources | 各类别的上次结果，或错误、连续失败次数和下次可重试时间 |
+| state.pending / history | 待通知队列和最近最多 100 条检测记录。旧记录没有 `kind`，按视频兼容 |
 | state.failures / error / note | 连续失败次数、错误与说明 |
 | state.lastAttempt / lastSuccess / nextCheck | 毫秒时间戳；下次检查可为空 |
 
-视频记录使用 `id`、`uid`、`author`、`title`、`published`、`url`；历史另有 `detected`。`published` 是秒级时间戳，其他记录时间是毫秒，不要混用。
+记录共有 `kind`、`id`、`uid`、`author`、`title`。投稿或动态的 `published` 为秒，历史的 `detected` 为毫秒。直播通知队列项另含 `session`，用于区分同一房间先后开播产生的通知。链接根据类别和 ID 构造。
 
 新增可选字段应提供读取默认值。改变字段语义或结构时需要显式迁移方案与旧存储回归测试；不要借版本号修改自动清空数据。现有实现没有通用存储 schema 迁移框架，尚不需要为此额外引入基础设施。
 
@@ -32,10 +34,10 @@
 
 - Promise 队列串行执行初始化、检查与设置操作，避免并行修改状态。
 - 使用一次性 `chrome.alarms`；每次检查后重新安排，后台唤醒时确认任务存在。浏览器可能回收空闲 service worker，不能依赖常驻内存计时器。
-- 失败按 `interval × 2^failures` 退避，上限 60 分钟。暂停取消定时任务；手动检查仍可执行。
-- 新视频先写入待发送队列，再发送通知，发送后移除并落盘。发送失败保留队列；意外退出的极小时间窗可能重复发送。
-- 投稿通知 ID 为 `video:BV...`；测试通知为 `test:<随机 UUID>`。连续测试前清理仍存在的测试提醒，不能清理真实视频提醒。兼容旧 `test` ID 的点击行为。
-- 通知点击仅通过已验证 BV 构造 B站链接；测试通知打开设置页。
+- 失败按 `interval × 2^failures` 退避，上限 60 分钟。各来源分别退避，失败不会阻塞其他来源。登录或通知发送失败仍走全局退避。暂停取消定时任务，手动检查仍可运行。
+- 新内容先写入待发送队列，通知成功后移除并落盘。发送失败保留队列，下一次成功读取直播列表时移除已关播的待发送项。
+- 正式通知 ID 分别使用 `video:<BV>`、`dynamic:<动态 ID>`、`live:<房间 ID>:<会话 UUID>`。测试使用 `test:<BV>:<UUID>`，只清理之前的测试提醒。
+- 测试独立读取视频流首页，按发布时间选取最新投稿，套用正式通知样式。点击测试或正式通知使用 ID 构造 B站链接。测试不会更改基线、队列或检测记录。
 
 ## 消息与输入边界
 

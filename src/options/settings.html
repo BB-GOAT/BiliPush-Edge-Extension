@@ -6,28 +6,40 @@
 </head>
 <body>
 <main>
-  <header><img src="../../assets/icon.png" alt="" width="52" height="52"><div><h1>B站关注视频提醒</h1><p>关注的 UP 主有新投稿，直接在桌面接收提醒。</p></div></header>
+  <header><img src="../../assets/icon.png" alt="" width="52" height="52"><div><h1>B站关注视频提醒</h1><p>在桌面接收关注 UP 主的投稿、动态和开播提醒。</p></div></header>
   <section aria-labelledby="status-title">
     <div class="section-head"><h2 id="status-title">运行状态</h2><span id="badge">正在读取</span></div>
     <dl><div><dt>当前账号</dt><dd id="account">尚未检查</dd></div><div><dt>上次尝试</dt><dd id="attempt">—</dd></div><div><dt>上次成功</dt><dd id="success">—</dd></div><div><dt>下次检查</dt><dd id="next">—</dd></div></dl>
     <p id="note" class="hint"></p><p id="error" class="error" role="alert" hidden></p>
     <div class="buttons"><button id="check" type="button">立即检查</button><button id="test" class="secondary" type="button">测试系统通知</button><a href="https://www.bilibili.com/" target="_blank" rel="noreferrer">打开 B站 / 登录</a></div>
+    <p id="check-feedback" class="hint" role="status"></p>
   </section>
   <section aria-labelledby="settings-title">
     <h2 id="settings-title">提醒设置</h2>
     <form id="settings">
       <label class="toggle"><input id="enabled" type="checkbox">启用自动检查与通知</label>
       <div class="fields"><label>检查间隔（分钟）<input id="interval" type="number" min="1" max="60" step="1" required><small>支持 1～60 分钟，默认 3 分钟。失败时自动延长至最多 60 分钟。</small></label>
-      <label>每次最多检查页数<input id="maxPages" type="number" min="1" max="10" step="1" required><small>默认 5 页。通常遇到已检查的视频便会停止翻页。</small></label></div>
-      <label>提醒范围<select id="mode"><option value="all">所有已关注的 UP 主</option><option value="selected">仅指定的已关注 UP 主</option></select></label>
-      <label id="uids-field" hidden>UP 主 UID 列表<textarea id="uids" rows="3" placeholder="例如：282994，一行一个，也可用逗号或空格分隔"></textarea><small>UID 是个人空间网址 space.bilibili.com/ 后的数字。此处用于筛选关注流，不能订阅尚未关注的人。</small></label>
+      <label>视频和动态的检查页数<input id="maxPages" type="number" min="1" max="10" step="1" required><small>每类最多检查这么多页，默认 5 页。</small></label></div>
+      <div id="rules"></div>
+      <p class="hint">UID 是 UP 主个人空间网址末尾的数字。三种提醒都只检查已关注的 UP 主。</p>
       <label class="toggle"><input id="silent" type="checkbox">静音通知（仍显示桌面横幅）</label>
       <div class="buttons"><button type="submit">保存设置</button><span id="feedback" role="status" aria-live="polite"></span></div>
     </form>
   </section>
-  <section aria-labelledby="history-title"><div class="section-head"><h2 id="history-title">最近检测到的视频</h2><span class="hint">最多保留 100 条</span></div><p class="hint">包含首次建立基线的视频；这里是检测记录，不代表每条都发送过通知。</p><div id="history"></div></section>
-  <footer>登录凭据由 Edge 自动附带，不保存 Cookie。首次启用仅建立基线，不推送旧视频。<br>需要 Edge 在后台运行；电脑休眠、断网或浏览器完全退出时无法按时检查。Windows 免打扰可能隐藏横幅。</footer>
+  <section aria-labelledby="history-title"><div class="section-head"><h2 id="history-title">最近检测到的内容</h2><span class="hint">最多保留 100 条</span></div><p class="hint">检测记录包含初次读到的内容，不代表每条都发送过通知。</p><div id="history"></div></section>
+  <footer>Edge 自动沿用 B站登录状态。各类提醒首次开启时，只记录已有内容。<br>需要 Edge 在后台运行。电脑休眠、断网或浏览器完全退出时无法按时检查。</footer>
 </main>
+<template id="rule-template">
+  <fieldset class="rule">
+    <legend></legend>
+    <label>提醒范围<select>
+      <option value="off">关闭</option>
+      <option value="all">所有已关注的 UP 主</option>
+      <option value="selected">仅指定的已关注 UP 主</option>
+    </select></label>
+    <label hidden>UP 主 UID 列表<textarea rows="3" placeholder="一行一个，也可用逗号或空格分隔"></textarea></label>
+  </fieldset>
+</template>
 <script type="module" src="settings.js"></script>
 </body>
 </html>

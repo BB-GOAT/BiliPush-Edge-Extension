@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "B站关注视频提醒",
   "version": "1.0.0",
-  "description": "复用 Edge 的 B站登录状态，检查关注 UP 主的视频更新并显示系统通知。",
+  "description": "复用 Edge 的 B站登录状态，在桌面接收关注 UP 主的视频、动态和开播提醒。",
   "permissions": [
     "alarms",
     "storage",
@@ -10,6 +10,9 @@
   ],
   "host_permissions": [
     "https://api.bilibili.com/*"
+  ],
+  "optional_host_permissions": [
+    "https://api.live.bilibili.com/*"
   ],
   "background": {
     "service_worker": "src/background.js",

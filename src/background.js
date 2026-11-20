@@ -1,11 +1,21 @@
-import { DEFAULTS, normalizeSettings, scanFeed, matches } from './core.js';
+import {
+  KINDS, KIND_LABELS, LIVE_ORIGIN, LIVE_PERMISSION, normalizeSettings,
+  videoFromItem, dynamicFromItem, dynamicFeedId, liveFromResponse, itemUrl, scanFeed, matches
+} from './core.js';
 
 const ALARM = 'check-videos';
 // 使用扩展根目录下的完整地址，避免通知图标随后台脚本目录解析。
 const NOTIFICATION_ICON = chrome.runtime.getURL('assets/icon.png');
 const API = 'https://api.bilibili.com';
-const EMPTY = { account: '', seen: [], baseline: false, pending: [], history: [], failures: 0 };
-const emptyState = () => ({ ...EMPTY, seen: [], pending: [], history: [] });
+const emptyState = () => ({
+  account: '', seen: [], baseline: false, dynamicSeen: [], dynamicBaseline: false,
+  liveRooms: null, sources: {}, pending: [], history: [], failures: 0
+});
+const enabledKinds = settings => KINDS.filter(kind => settings.rules[kind].mode !== 'off');
+const feed = (type, offset = '') => api(`/x/polymer/web-dynamic/v1/feed/all?type=${type}&timezone_offset=-480`
+  + (offset ? `&offset=${encodeURIComponent(offset)}` : ''));
+const sourceErrors = (state, kinds) => kinds.filter(kind => state.sources[kind]?.error)
+  .map(kind => `${KIND_LABELS[kind]}：${state.sources[kind].error}`).join('；');
 let queue = Promise.resolve();
 function serial(task) {
   const result = queue.then(task);
@@ -14,13 +24,13 @@ function serial(task) {
 }
 async function read() {
   const stored = await chrome.storage.local.get(['settings', 'state']);
-  return { settings: normalizeSettings(stored.settings ?? DEFAULTS), state: { ...emptyState(), ...stored.state } };
+  return { settings: normalizeSettings(stored.settings), state: { ...emptyState(), ...stored.state } };
 }
-async function api(path) {
+async function api(path, origin = API) {
   let response;
   try {
     // Cookie 由浏览器自动附带；不读取、复制或保存登录凭据。
-    response = await fetch(API + path, {
+    response = await fetch(origin + path, {
       credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(20000)
     });
   } catch {
@@ -36,12 +46,17 @@ async function api(path) {
   }
   return body.data;
 }
+async function currentAccount() {
+  const account = await api('/x/web-interface/nav');
+  if (!account?.isLogin || !account.mid) throw new Error('请先在当前 Edge 配置文件中登录 B站。');
+  return account;
+}
 async function badge(text, color = '#d55435') {
   await chrome.action.setBadgeText({ text });
   await chrome.action.setBadgeBackgroundColor({ color });
 }
 async function schedule(settings, state, preserve = false) {
-  if (!settings.enabled) {
+  if (!settings.enabled || !enabledKinds(settings).length) {
     await chrome.alarms.clear(ALARM);
     state.nextCheck = null;
   } else {
@@ -51,51 +66,117 @@ async function schedule(settings, state, preserve = false) {
     if (!existing) await chrome.alarms.create(ALARM, { when: state.nextCheck });
   }
 }
-async function flush(state, settings) {
-  while (state.pending.length) {
-    const video = state.pending[0];
+function notify(item, id, silent, test = false) {
+  const kind = item.kind ?? 'video';
+  const verb = { video: '投稿了新视频', dynamic: '发布了新动态', live: '开播了' }[kind];
+  return chrome.notifications.create(id, {
+    type: 'basic', iconUrl: NOTIFICATION_ICON, title: `${test ? '【测试】' : ''}${item.author} ${verb}`,
+    message: item.title, silent
+  });
+}
+async function flush(state, settings, liveChecked) {
+  for (let index = 0; index < state.pending.length;) {
+    const item = state.pending[index];
+    const kind = item.kind ?? 'video';
     // 设置变更后尚未发送的通知也遵循最新筛选规则。
-    if (matches(video, settings)) {
-      await chrome.notifications.create(`video:${video.id}`, {
-        type: 'basic', iconUrl: NOTIFICATION_ICON, title: `${video.author} 投稿了新视频`,
-        message: video.title, silent: settings.silent
-      });
+    if (matches(item, settings) && itemUrl(kind, item.id)) {
+      // 直播列表读取失败时保留待发项，等下一次确认还在播再通知。
+      if (kind === 'live' && !liveChecked) {
+        index++;
+        continue;
+      }
+      const session = kind === 'live' ? `:${item.session}` : '';
+      await notify(item, `${kind}:${item.id}${session}`, settings.silent);
     }
-    state.pending.shift();
+    state.pending.splice(index, 1);
     await chrome.storage.local.set({ state });
   }
 }
+
+async function scanKind(kind, settings, state) {
+  if (kind === 'live') {
+    if (!await chrome.permissions.contains(LIVE_PERMISSION)) {
+      throw new Error('请在设置中重新保存直播提醒并允许访问 B站直播接口。');
+    }
+    const rooms = liveFromResponse(await api('/xlive/web-ucenter/v1/xfetter/GetWebList?hit_ab=true', LIVE_ORIGIN));
+    const previous = new Set(state.liveRooms ?? []);
+    const ready = state.liveRooms !== null;
+    const fresh = ready ? rooms.filter(room => !previous.has(room.id)) : [];
+    return { records: fresh, fresh, ready, liveRooms: rooms.map(room => room.id) };
+  }
+  const video = kind === 'video';
+  const ready = video ? state.baseline : state.dynamicBaseline;
+  const seen = video ? state.seen : state.dynamicSeen;
+  const scan = await scanFeed(offset => feed(video ? 'video' : 'all', offset), ready ? seen : [], settings.maxPages,
+    video ? videoFromItem : dynamicFromItem, video ? undefined : dynamicFeedId);
+  const known = new Set(seen);
+  return { ready, records: scan.items.filter(item => !known.has(item.id)), fresh: ready ? scan.fresh : [],
+    seen: [...new Set([...scan.seen, ...seen])].slice(0, 3000), gap: scan.gap };
+}
+
+function recordScan(kind, result, state, settings) {
+  if (kind === 'video') {
+    state.baseline = true;
+    state.seen = result.seen;
+  } else if (kind === 'dynamic') {
+    state.dynamicBaseline = true;
+    state.dynamicSeen = result.seen;
+  } else {
+    state.liveRooms = result.liveRooms;
+    const active = new Set(result.liveRooms);
+    state.pending = state.pending.filter(item => item.kind !== 'live' || active.has(item.id));
+  }
+  const detected = Date.now();
+  const fresh = result.fresh.filter(item => matches(item, settings));
+  state.pending.push(...fresh.sort((a, b) => (a.published ?? 0) - (b.published ?? 0))
+    .map(item => kind === 'live' ? { ...item, session: crypto.randomUUID() } : item));
+  const records = result.records.map(item => ({ ...item, detected }));
+  const note = !result.ready ? '已建立基线' : `${fresh.length} 条新提醒${result.gap ? '，页数不足，可能遗漏更早更新' : ''}`;
+  return { records, note };
+}
+
 async function check(manual = false) {
   const { settings, state: saved } = await read();
   let state = saved;
   if (!settings.enabled && !manual) return;
+  const kinds = enabledKinds(settings);
+  if (!kinds.length) return { settings, state };
   state.lastAttempt = Date.now();
   try {
-    const account = await api('/x/web-interface/nav');
-    if (!account?.isLogin || !account.mid) throw new Error('请先在当前 Edge 配置文件中登录 B站。');
+    const account = await currentAccount();
     const mid = String(account.mid);
     if (state.account !== mid) state = { ...emptyState(), account: mid, lastAttempt: Date.now() };
     state.accountName = String(account.uname ?? mid);
-    await flush(state, settings);
-    const scan = await scanFeed(offset => api('/x/polymer/web-dynamic/v1/feed/all?type=video&timezone_offset=-480'
-      + (offset ? `&offset=${encodeURIComponent(offset)}` : '')), state.baseline ? state.seen : [], settings.maxPages);
-    const fresh = state.baseline ? scan.fresh.filter(video => matches(video, settings)) : [];
-    const old = new Set(state.seen);
-    state.seen = [...new Set([...scan.videos.map(video => video.id), ...state.seen])].slice(0, 3000);
-    const records = scan.videos.filter(video => !old.has(video.id)).map(video => ({ ...video, detected: Date.now() }));
+    // 各来源并行读取、分别记录错误，直播或动态接口失败不阻塞投稿检查。
+    const due = kinds.filter(kind => manual || !(state.sources[kind]?.retryAt > Date.now()));
+    const scans = await Promise.allSettled(due.map(kind => scanKind(kind, settings, state)));
+    const records = [];
+    let liveChecked = false;
+    for (const [index, kind] of due.entries()) {
+      const scan = scans[index];
+      if (scan.status === 'rejected') {
+        const failures = (state.sources[kind]?.failures ?? 0) + 1;
+        const delay = Math.min(60, settings.interval * 2 ** Math.min(failures, 6));
+        state.sources[kind] = { failures, retryAt: Date.now() + delay * 60000,
+          error: scan.reason?.message ?? String(scan.reason) };
+        continue;
+      }
+      const result = recordScan(kind, scan.value, state, settings);
+      if (kind === 'live') liveChecked = true;
+      records.push(...result.records);
+      state.sources[kind] = { note: result.note };
+      state.lastSuccess = Date.now();
+    }
+    records.sort((a, b) => (b.published || b.detected / 1000) - (a.published || a.detected / 1000));
     state.history = [...records, ...state.history].slice(0, 100);
-    state.pending.push(...fresh.sort((a, b) => a.published - b.published));
-    state.note = !state.baseline ? '已建立基线，现有视频不会弹出通知。'
-      : scan.gap ? `已检查 ${scan.pages} 页，仍未衔接上次记录，更早更新可能遗漏。可增大检查页数。`
-      : `检查完成，发现 ${fresh.length} 个符合设置的新视频。`;
-    state.baseline = true;
-    state.lastSuccess = Date.now();
+    state.note = kinds.map(kind => `${KIND_LABELS[kind]}：${state.sources[kind]?.note ?? '等待重试'}`).join('；');
     state.failures = 0;
-    state.error = '';
+    state.error = sourceErrors(state, kinds);
     // 先落盘待发送列表，避免后台休眠时丢失整批通知。
     await chrome.storage.local.set({ state });
-    await flush(state, settings);
-    await badge(settings.enabled ? '' : '停', '#64748b');
+    await flush(state, settings, liveChecked);
+    if (state.error) await badge('!');
+    else await badge(settings.enabled ? '' : '停', '#64748b');
   } catch (error) {
     state.failures = (state.failures || 0) + 1;
     state.error = error.message || String(error);
@@ -104,6 +185,40 @@ async function check(manual = false) {
   await schedule(settings, state);
   await chrome.storage.local.set({ state });
   return { settings, state };
+}
+
+async function saveSettings(input) {
+  const { state } = await read();
+  const settings = normalizeSettings(input);
+  for (const kind of KINDS) {
+    if (settings.rules[kind].mode !== 'off') continue;
+    delete state.sources[kind];
+    if (kind === 'video') state.baseline = false;
+    if (kind === 'dynamic') state.dynamicBaseline = false;
+    if (kind === 'live') state.liveRooms = null;
+  }
+  state.pending = state.pending.filter(item => matches(item, settings));
+  const kinds = enabledKinds(settings);
+  if (!state.failures) state.error = sourceErrors(state, kinds);
+  await schedule(settings, state);
+  await chrome.storage.local.set({ settings, state });
+  await badge(settings.enabled && kinds.length ? (state.error ? '!' : '') : '停', '#64748b');
+  return { settings, state };
+}
+
+async function testNotification() {
+  await currentAccount();
+  const data = await feed('video');
+  if (!Array.isArray(data?.items)) throw new Error('B站未返回关注视频列表。');
+  const latest = data.items.map(videoFromItem).filter(Boolean).sort((a, b) => b.published - a.published)[0];
+  if (!latest) throw new Error('关注流里没有可用于测试的视频。');
+  // 每次创建新测试通知。用 BV 号点击直达视频，不写入检查状态。
+  const active = await chrome.notifications.getAll();
+  for (const id of Object.keys(active)) {
+    if (id === 'test' || id.startsWith('test:')) await chrome.notifications.clear(id);
+  }
+  await notify(latest, `test:${latest.id}:${crypto.randomUUID()}`, false, true);
+  return { title: latest.title };
 }
 async function initialize() {
   await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
@@ -118,9 +233,10 @@ chrome.alarms.onAlarm.addListener(alarm => {
 });
 chrome.action.onClicked.addListener(() => { void chrome.runtime.openOptionsPage(); });
 chrome.notifications.onClicked.addListener(id => {
-  if (id.startsWith('video:') && /^BV[A-Za-z0-9]{10}$/.test(id.slice(6))) {
-    void chrome.tabs.create({ url: `https://www.bilibili.com/video/${id.slice(6)}/` });
-  } else if (id === 'test' || id.startsWith('test:')) void chrome.runtime.openOptionsPage();
+  const [kind, itemId] = id.split(':');
+  const url = itemUrl(kind === 'test' ? 'video' : kind, itemId);
+  if (url) void chrome.tabs.create({ url });
+  else if (kind === 'test') void chrome.runtime.openOptionsPage();
   void chrome.notifications.clear(id);
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -142,25 +258,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     switch (message.type) {
       case 'status': return read();
       case 'check': return check(true);
-      case 'save': {
-        const { state } = await read();
-        const settings = normalizeSettings(message.settings);
-        await schedule(settings, state);
-        await chrome.storage.local.set({ settings, state });
-        await badge(settings.enabled ? (state.error ? '!' : '') : '停', '#64748b');
-        return { settings, state };
-      }
-      case 'test': {
-        // 独立 ID 使连续测试创建新通知，避免系统只更新已有通知而不再显示横幅。
-        // 只清理测试通知，保留真实投稿提醒。
-        const active = await chrome.notifications.getAll();
-        for (const id of Object.keys(active)) {
-          if (id === 'test' || id.startsWith('test:')) await chrome.notifications.clear(id);
-        }
-        await chrome.notifications.create(`test:${crypto.randomUUID()}`, { type: 'basic', iconUrl: NOTIFICATION_ICON,
-          title: 'B站关注视频提醒', message: '系统通知测试成功。点击通知可返回设置面板。', silent: false });
-        return { ok: true };
-      }
+      case 'save': return saveSettings(message.settings);
+      case 'test': return testNotification();
       default: throw new Error('未知操作');
     }
   }).then(result => respond({ result }), error => respond({ error: error.message }));
