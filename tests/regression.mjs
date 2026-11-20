@@ -94,6 +94,7 @@ let liveHttpStatus = 0;
 let dynamicError;
 let unavailableSession = false;
 let liveCalls = 0;
+let accountCalls = 0;
 const followingCalls = [];
 const followingPages = new Map();
 let whisperResponse = { code: 0, data: { list: [{ mid: '70', uname: '旧悄悄关注样例', attribute: 1 }] } };
@@ -181,6 +182,7 @@ globalThis.chrome = {
 };
 globalThis.fetch = async (url, options) => {
   const parsed = new URL(url);
+  if (parsed.pathname === '/x/web-interface/nav') accountCalls++;
   if (parsed.hostname === 'api.live.bilibili.com') {
     liveCalls++;
     if (liveHttpStatus) return { ok: false, status: liveHttpStatus };
@@ -323,6 +325,21 @@ await message('check');
 equal(store.state.failures, 2);
 equal(sessionStore.recentIssues.entries.at(-1).count, 2);
 equal(Math.round((store.state.nextCheck - Date.now()) / 60000), 28);
+// Edge 在退避期间重新启动时，保留原检查时间，闹钟丢失时按原时间补建。
+const beforeRestart = { state: structuredClone(store.state), accountCalls };
+const retryAlarm = alarms.get('check-videos');
+equal(retryAlarm.scheduledTime, beforeRestart.state.nextCheck);
+chrome.runtime.onStartup.listener();
+await message('status');
+equal(store.state, beforeRestart.state);
+equal(accountCalls, beforeRestart.accountCalls);
+equal(alarms.get('check-videos'), retryAlarm);
+alarms.delete('check-videos');
+chrome.runtime.onStartup.listener();
+await message('status');
+equal(alarms.get('check-videos'), retryAlarm);
+equal(store.state, beforeRestart.state);
+equal(accountCalls, beforeRestart.accountCalls);
 apiFailure = false;
 await message('check');
 equal(store.state.failures, 0);
@@ -641,8 +658,21 @@ equal(sessionStore.recentIssues.scope, newAccount.state.diagnosticScope);
 equal(sessionStore.recentIssues.entries.length, 1);
 liveHttpStatus = 0;
 
+// 关停期间错过的计划可在启动后补查，排队中的旧闹钟不会重复查询。
+const missedCheck = Date.now() - 60000;
+store.state.nextCheck = missedCheck;
+alarms.delete('check-videos');
+const beforeCatchUp = accountCalls;
 chrome.runtime.onStartup.listener();
+chrome.alarms.onAlarm.listener({ name: 'check-videos', scheduledTime: missedCheck });
 equal((await message('status')).state.lastTrigger, 'startup');
+equal(accountCalls, beforeCatchUp + 1);
+equal(store.state.nextCheck > Date.now(), true);
+const nextAlarm = alarms.get('check-videos');
+alarms.delete('check-videos');
+chrome.alarms.onAlarm.listener({ name: 'check-videos', ...nextAlarm });
+equal((await message('status')).state.lastTrigger, 'alarm');
+equal(accountCalls, beforeCatchUp + 2);
 chrome.runtime.onInstalled.listener();
 equal((await message('status')).state.lastTrigger, 'installed');
 

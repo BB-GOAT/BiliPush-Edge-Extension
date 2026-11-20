@@ -118,8 +118,10 @@ async function schedule(settings, state, preserve = false) {
     state.nextCheck = null;
   } else {
     const existing = preserve ? await chrome.alarms.get(ALARM) : null;
+    // 浏览器重启可能清除闹钟，恢复时沿用已保存的计划，包括失败退避。
+    const savedTime = preserve && Number.isFinite(state.nextCheck) ? state.nextCheck : null;
     const delay = Math.min(60, settings.interval * 2 ** Math.min(state.failures || 0, 6));
-    state.nextCheck = existing?.scheduledTime ?? Date.now() + delay * 60000;
+    state.nextCheck = existing?.scheduledTime ?? savedTime ?? Date.now() + delay * 60000;
     if (!existing) await chrome.alarms.create(ALARM, { when: state.nextCheck });
   }
 }
@@ -211,14 +213,18 @@ function setGlobalIssue(state, events, source, issue) {
   else delete state.globalIssues[source];
 }
 
-async function check(trigger) {
+async function check(trigger, scheduledTime) {
   const manual = trigger === 'manual';
   const { settings, state: saved } = await read();
   let state = saved;
   if (!settings.enabled && !manual) return;
   const kinds = enabledKinds(settings);
   if (!kinds.length) return;
-  state.lastAttempt = Date.now();
+  const startedAt = Date.now();
+  if (trigger === 'startup' && state.nextCheck > startedAt) return;
+  // 启动补查或手动检查已重新排期时，忽略旧计划迟到的闹钟事件。
+  if (trigger === 'alarm' && scheduledTime < state.nextCheck) return;
+  state.lastAttempt = startedAt;
   state.lastTrigger = trigger;
   const events = [];
   let resetHistory = false;
@@ -360,6 +366,11 @@ async function initialize() {
   await schedule(settings, state, true);
   await chrome.storage.local.set({ settings, state });
 }
+async function resumeChecks() {
+  await initialize();
+  await check('startup');
+}
+
 async function openNotificationPage(url) {
   let window;
   try {
@@ -391,9 +402,9 @@ async function handleNotificationClick(id) {
 }
 
 chrome.runtime.onInstalled.addListener(() => { void serial(async () => { await initialize(); await check('installed'); }); });
-chrome.runtime.onStartup.addListener(() => { void serial(async () => { await initialize(); await check('startup'); }); });
+chrome.runtime.onStartup.addListener(() => { void serial(resumeChecks); });
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === ALARM) void serial(() => check('alarm'));
+  if (alarm.name === ALARM) void serial(() => check('alarm', alarm.scheduledTime));
 });
 chrome.action.onClicked.addListener(() => { void chrome.runtime.openOptionsPage(); });
 chrome.notifications.onClicked.addListener(handleNotificationClick);
