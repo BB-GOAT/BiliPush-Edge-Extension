@@ -1,12 +1,26 @@
 {
   "manifest_version": 3,
   "name": "B站关注视频提醒",
-  "version": "1.0.1",
+  "version": "1.0.0",
   "description": "复用 Edge 的 B站登录状态，检查关注 UP 主的视频更新并显示系统通知。",
-  "permissions": ["alarms", "storage", "notifications"],
-  "host_permissions": ["https://api.bilibili.com/*"],
-  "background": {"service_worker": "background.js", "type": "module"},
-  "action": {"default_title": "打开 B站视频提醒设置", "default_icon": "icon.png"},
-  "options_page": "settings.html",
-  "icons": {"128": "icon.png"}
+  "permissions": [
+    "alarms",
+    "storage",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://api.bilibili.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "打开 B站视频提醒设置",
+    "default_icon": "assets/icon.png"
+  },
+  "options_page": "src/options/settings.html",
+  "icons": {
+    "128": "assets/icon.png"
+  }
 }

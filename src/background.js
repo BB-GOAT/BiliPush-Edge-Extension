@@ -55,7 +55,7 @@ async function flush(state, settings) {
     // 设置变更后尚未发送的通知也遵循最新筛选规则。
     if (matches(video, settings)) {
       await chrome.notifications.create(`video:${video.id}`, {
-        type: 'basic', iconUrl: 'icon.png', title: `${video.author} 投稿了新视频`,
+        type: 'basic', iconUrl: 'assets/icon.png', title: `${video.author} 投稿了新视频`,
         message: video.title, silent: settings.silent
       });
     }
@@ -118,7 +118,7 @@ chrome.action.onClicked.addListener(() => { void chrome.runtime.openOptionsPage(
 chrome.notifications.onClicked.addListener(id => {
   if (id.startsWith('video:') && /^BV[A-Za-z0-9]{10}$/.test(id.slice(6))) {
     void chrome.tabs.create({ url: `https://www.bilibili.com/video/${id.slice(6)}/` });
-  } else if (id === 'test') void chrome.runtime.openOptionsPage();
+  } else if (id === 'test' || id.startsWith('test:')) void chrome.runtime.openOptionsPage();
   void chrome.notifications.clear(id);
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -130,7 +130,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     const page = new URL(sender.url);
     page.search = '';
     page.hash = '';
-    trusted = page.href === chrome.runtime.getURL('settings.html');
+    trusted = page.href === chrome.runtime.getURL('src/options/settings.html');
   } catch {}
   if (!trusted) {
     respond({ error: '消息来源不是本扩展的设置页，请关闭此页后重新点击扩展图标打开。' });
@@ -148,10 +148,17 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         await badge(settings.enabled ? (state.error ? '!' : '') : '停', '#64748b');
         return { settings, state };
       }
-      case 'test':
-        await chrome.notifications.create('test', { type: 'basic', iconUrl: 'icon.png',
+      case 'test': {
+        // 独立 ID 使连续测试创建新通知，避免系统只更新已有通知而不再显示横幅。
+        // 只清理测试通知，保留真实投稿提醒。
+        const active = await chrome.notifications.getAll();
+        for (const id of Object.keys(active)) {
+          if (id === 'test' || id.startsWith('test:')) await chrome.notifications.clear(id);
+        }
+        await chrome.notifications.create(`test:${crypto.randomUUID()}`, { type: 'basic', iconUrl: 'assets/icon.png',
           title: 'B站关注视频提醒', message: '系统通知测试成功。点击通知可返回设置面板。', silent: false });
         return { ok: true };
+      }
       default: throw new Error('未知操作');
     }
   }).then(result => respond({ result }), error => respond({ error: error.message }));
