@@ -1,18 +1,43 @@
 import { KINDS, KIND_LABELS, LIVE_PERMISSION, itemUrl } from '../core.js';
+import { createFollowPicker } from './follow-picker.js';
 
 const $ = id => document.getElementById(id);
 let busy = false;
 let loaded = false;
 const time = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
 const ruleFields = {};
+const picker = createFollowPicker({
+  loadPage: (page, account) => send('followings', { page, account }),
+  confirm(draft) {
+    for (const kind of KINDS) {
+      ruleFields[kind].uids = [...draft[kind]];
+      ruleFields[kind].sync();
+    }
+    $('feedback').textContent = '名单已更新，点击「保存设置」后生效。';
+  }
+});
 for (const kind of KINDS) {
   const group = $('rule-template').content.cloneNode(true);
   group.querySelector('legend').textContent = KIND_LABELS[kind];
   const mode = group.querySelector('select');
-  const uids = group.querySelector('textarea');
-  const sync = () => { uids.parentElement.hidden = mode.value !== 'selected'; };
-  mode.addEventListener('change', sync);
-  ruleFields[kind] = { mode, uids, sync };
+  const selection = group.querySelector('.rule-selection');
+  const choose = selection.querySelector('button');
+  const field = { mode, uids: [], sync() {
+    const selected = mode.value === 'selected';
+    selection.hidden = !selected;
+    selection.closest('fieldset').classList.toggle('rule-selected', selected);
+    selection.querySelector('strong').textContent = `已选 ${field.uids.length} 位`;
+  } };
+  choose.setAttribute('aria-label', `选择${KIND_LABELS[kind]}提醒的 UP 主`);
+  choose.addEventListener('click', () => {
+    if (!loaded || busy) return;
+    const rules = Object.fromEntries(KINDS.map(key => [key, {
+      mode: ruleFields[key].mode.value, uids: ruleFields[key].uids
+    }]));
+    picker.open(kind, rules);
+  });
+  mode.addEventListener('change', field.sync);
+  ruleFields[kind] = field;
   $('rules').append(group);
 }
 async function send(type, data = {}) {
@@ -26,10 +51,10 @@ function render({ settings, state }, fill = false) {
     for (const key of ['interval', 'maxPages']) $(key).value = settings[key];
     for (const key of ['enabled', 'silent']) $(key).checked = settings[key];
     for (const kind of KINDS) {
-      const { mode, uids, sync } = ruleFields[kind];
-      mode.value = settings.rules[kind].mode;
-      uids.value = settings.rules[kind].uids.join('\n');
-      sync();
+      const field = ruleFields[kind];
+      field.mode.value = settings.rules[kind].mode;
+      field.uids = settings.rules[kind].uids;
+      field.sync();
     }
     loaded = true;
   }
@@ -67,14 +92,14 @@ async function action(button, feedback, task) {
   if (busy) return;
   busy = true;
   const old = button.textContent;
-  document.querySelectorAll('button').forEach(node => node.disabled = true);
+  document.querySelectorAll('main button').forEach(node => node.disabled = true);
   button.textContent = '处理中…';
   $(feedback).textContent = '';
   try { await task(); }
   catch (error) { $(feedback).textContent = error.message; }
   finally {
     busy = false;
-    document.querySelectorAll('button').forEach(node => node.disabled = false);
+    document.querySelectorAll('main button').forEach(node => node.disabled = false);
     button.textContent = old;
   }
 }
@@ -84,10 +109,9 @@ $('settings').addEventListener('submit', event => {
   void action(event.submitter, 'feedback', async () => {
     const rules = {};
     for (const kind of KINDS) {
-      const { mode, uids: input } = ruleFields[kind];
-      const uids = input.value.split(/[\s,，;；]+/).filter(Boolean);
-      if (mode.value === 'selected' && (!uids.length || uids.some(uid => !/^[1-9]\d{0,19}$/.test(uid)))) {
-        throw new Error(`${KIND_LABELS[kind]}：请填写至少一个有效的 UP 主 UID。`);
+      const { mode, uids } = ruleFields[kind];
+      if (mode.value === 'selected' && !uids.length) {
+        throw new Error(`${KIND_LABELS[kind]}：请在选择面板中至少勾选一位 UP 主。`);
       }
       rules[kind] = { mode: mode.value, uids };
     }
@@ -105,12 +129,29 @@ $('settings').addEventListener('submit', event => {
   });
 });
 $('check').addEventListener('click', () => { void action($('check'), 'check-feedback', async () => {
+  $('test-live-demo').hidden = true;
   render(await send('check'));
 }); });
-$('test').addEventListener('click', () => { void action($('test'), 'check-feedback', async () => {
-  const { title } = await send('test');
-  $('check-feedback').textContent = `已发送测试通知《${title}》。点击横幅可打开视频。`;
-}); });
+function test(kind, demo = false) {
+  const button = $(demo ? 'test-live-demo' : `test-${kind}`);
+  void action(button, 'check-feedback', async () => {
+    $('test-live-demo').hidden = true;
+    if (kind === 'live' && !demo && !await chrome.permissions.request(LIVE_PERMISSION)) {
+      throw new Error('测试真实直播需要允许访问 B站直播接口。');
+    }
+    const result = await send('test', { kind, demo });
+    if (result.noLive) {
+      $('check-feedback').textContent = '当前没有已关注的 UP 主正在直播。可以发送一条演示通知查看样式。';
+      $('test-live-demo').hidden = false;
+      return;
+    }
+    const target = { video: '视频', dynamic: '原动态', live: '直播间' }[kind];
+    $('check-feedback').textContent = demo ? '已发送直播演示通知。点击横幅可返回设置。'
+      : `已发送测试通知「${result.title}」。点击横幅可打开${target}。`;
+  });
+}
+for (const kind of KINDS) $(`test-${kind}`).addEventListener('click', () => test(kind));
+$('test-live-demo').addEventListener('click', () => test('live', true));
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.state && loaded) void send('status').then(result => render(result)).catch(() => {});
 });

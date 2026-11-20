@@ -1,5 +1,5 @@
 export const KINDS = ['video', 'dynamic', 'live'];
-export const KIND_LABELS = { video: '视频投稿', dynamic: '动态', live: '直播开播' };
+export const KIND_LABELS = { video: '视频投稿', dynamic: '普通动态', live: '直播开播' };
 export const LIVE_ORIGIN = 'https://api.live.bilibili.com';
 export const LIVE_PERMISSION = { origins: [`${LIVE_ORIGIN}/*`] };
 const DYNAMIC_TYPES = new Set([
@@ -32,9 +32,25 @@ export function normalizeSettings(input = {}) {
   };
 }
 
-function numericId(value) {
+export function numericId(value) {
   if (typeof value === 'number' && !Number.isSafeInteger(value)) return '';
   return (typeof value === 'string' || typeof value === 'number') && DIGITS.test(String(value)) ? String(value) : '';
+}
+
+export function followingFromItem(item) {
+  const uid = numericId(item?.mid);
+  if (!uid) return null;
+  let avatar = '';
+  try {
+    const url = new URL(item.face, 'https://i0.hdslb.com');
+    if (['http:', 'https:'].includes(url.protocol) && /^i[012]\.hdslb\.com$/.test(url.host)
+        && !url.username && !url.password && url.pathname.startsWith('/bfs/')) {
+      url.protocol = 'https:';
+      avatar = url.href;
+    }
+  } catch {}
+  const name = typeof item.uname === 'string' ? item.uname.trim() : '';
+  return { uid, name: name || `UID ${uid}`, avatar };
 }
 
 export function itemUrl(kind, id) {

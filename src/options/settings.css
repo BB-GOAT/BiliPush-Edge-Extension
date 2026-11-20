@@ -10,4 +10,53 @@
 .rule legend { padding: 0 6px; font-weight: 600; }
 .rule label { margin-bottom: 12px; }
 .rule label:last-of-type, .rule label:has(+ [hidden]) { margin-bottom: 0; }
+.rule-selected { border-color: #f1c7d6; background: #fff9fb; }
+.rule-selection { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 12px; }
 #check-feedback:empty { display: none; }
+
+#follow-picker {
+  width: min(620px, calc(100% - 28px));
+  max-width: none;
+  height: min(650px, calc(100dvh - 28px));
+  max-height: none;
+  margin: auto;
+  padding: 22px 24px 18px;
+  border: 1px solid #e0e7ef;
+  border-radius: 16px;
+  color: inherit;
+  box-shadow: 0 16px 50px #24344724;
+}
+#follow-picker[open] { display: flex; flex-direction: column; gap: 14px; }
+#follow-picker::backdrop { background: #24344755; }
+.picker-header, .picker-footer, .picker-progress { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.picker-header h2 { margin: 0; font-size: 23px; }
+.picker-header p, .picker-progress p { margin: 3px 0 0; }
+.picker-close { font-size: 20px; padding: 4px 11px; line-height: 1.3; }
+#picker-kinds { display: flex; gap: 6px; border-bottom: 1px solid #e0e7ef; }
+.picker-tab { display: flex; align-items: center; justify-content: center; gap: 7px; flex: 1; padding: 9px 5px; border-radius: 8px 8px 0 0; background: transparent; color: #52657a; border-bottom: 3px solid transparent; }
+.picker-tab span { min-width: 22px; padding: 2px 5px; border-radius: 20px; background: #edf2f7; font-size: 12px; text-align: center; }
+.picker-tab[aria-pressed="true"] { background: #fff1f5; color: #a72751; border-bottom-color: #d94372; }
+.picker-tab[aria-pressed="true"] span { background: #f9dce6; }
+.picker-filters { display: flex; align-items: center; gap: 12px; }
+.picker-filters label { margin: 0; flex: none; }
+#picker-search { min-width: 0; flex: 1; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; color: inherit; font: inherit; }
+#picker-search:focus-visible { outline: 3px solid #589edc; outline-offset: 2px; }
+#picker-list { min-height: 0; flex: 1; overflow: auto; scrollbar-gutter: stable; }
+.picker-empty { margin: 8px 4px; }
+.picker-person { display: grid; grid-template-columns: 36px minmax(0, 1fr) 20px; align-items: center; gap: 10px; min-height: 52px; margin: 0 0 2px; padding: 7px 10px; border-radius: 8px; border-bottom: 1px solid #edf1f6; font-weight: 400; overflow-wrap: anywhere; cursor: pointer; }
+.picker-person:hover { background: #f3f6fa; }
+.picker-person:has(input:checked) { background: #fff4f8; font-weight: 600; }
+.picker-person input { width: 18px; height: 18px; margin: 0; accent-color: #dc4877; cursor: pointer; }
+.picker-avatar { position: relative; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; overflow: hidden; background: #e5eef9; color: #406287; font-weight: 600; }
+.picker-avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.picker-progress { align-items: flex-start; }
+.picker-progress button { flex: none; padding: 6px 10px; font-size: 13px; }
+.picker-footer { border-top: 1px solid #e0e7ef; padding-top: 12px; }
+.picker-footer .buttons { flex: none; flex-wrap: nowrap; margin: 0; gap: 8px; }
+.picker-footer small { margin-top: 3px; }
+@media (max-width: 480px) {
+  #follow-picker { padding: 16px 12px; gap: 10px; }
+  .picker-tab { font-size: 13px; gap: 4px; }
+  .picker-footer { align-items: flex-start; flex-direction: column; }
+  .picker-footer .buttons { align-self: flex-end; }
+}

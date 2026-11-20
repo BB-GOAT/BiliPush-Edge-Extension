@@ -1,6 +1,7 @@
 import {
   KINDS, KIND_LABELS, LIVE_ORIGIN, LIVE_PERMISSION, normalizeSettings,
-  videoFromItem, dynamicFromItem, dynamicFeedId, liveFromResponse, itemUrl, scanFeed, matches
+  videoFromItem, dynamicFromItem, dynamicFeedId, liveFromResponse, itemUrl, scanFeed, matches,
+  numericId, followingFromItem
 } from './core.js';
 
 const ALARM = 'check-videos';
@@ -51,6 +52,21 @@ async function currentAccount() {
   if (!account?.isLogin || !account.mid) throw new Error('请先在当前 Edge 配置文件中登录 B站。');
   return account;
 }
+async function followingPage(page, expectedAccount) {
+  if (!Number.isSafeInteger(page) || page < 1 || (page > 1 && !expectedAccount)) {
+    throw new Error('关注列表页码无效，请重新打开选择面板。');
+  }
+  const account = numericId((await currentAccount()).mid);
+  if (!account) throw new Error('B站未返回有效的登录账号。');
+  if (expectedAccount && account !== expectedAccount) return { accountChanged: true };
+  const pageSize = 50;
+  const data = await api(`/x/relation/followings?vmid=${account}&pn=${page}&ps=${pageSize}&order=desc`);
+  if (!Array.isArray(data?.list) || !Number.isSafeInteger(data.total) || data.total < 0) {
+    throw new Error('B站未返回有效的关注列表。');
+  }
+  return { account, total: data.total, people: data.list.map(followingFromItem).filter(Boolean),
+    hasMore: page * pageSize < data.total };
+}
 async function badge(text, color = '#d55435') {
   await chrome.action.setBadgeText({ text });
   await chrome.action.setBadgeBackgroundColor({ color });
@@ -66,13 +82,20 @@ async function schedule(settings, state, preserve = false) {
     if (!existing) await chrome.alarms.create(ALARM, { when: state.nextCheck });
   }
 }
-function notify(item, id, silent, test = false) {
+function notify(item, id, silent, prefix = '') {
   const kind = item.kind ?? 'video';
   const verb = { video: '投稿了新视频', dynamic: '发布了新动态', live: '开播了' }[kind];
   return chrome.notifications.create(id, {
-    type: 'basic', iconUrl: NOTIFICATION_ICON, title: `${test ? '【测试】' : ''}${item.author} ${verb}`,
+    type: 'basic', iconUrl: NOTIFICATION_ICON, title: `${prefix}${item.author} ${verb}`,
     message: item.title, silent
   });
+}
+
+async function liveRooms() {
+  if (!await chrome.permissions.contains(LIVE_PERMISSION)) {
+    throw new Error('请在设置中允许访问 B站直播接口。');
+  }
+  return liveFromResponse(await api('/xlive/web-ucenter/v1/xfetter/GetWebList?hit_ab=true', LIVE_ORIGIN));
 }
 async function flush(state, settings, liveChecked) {
   for (let index = 0; index < state.pending.length;) {
@@ -95,10 +118,7 @@ async function flush(state, settings, liveChecked) {
 
 async function scanKind(kind, settings, state) {
   if (kind === 'live') {
-    if (!await chrome.permissions.contains(LIVE_PERMISSION)) {
-      throw new Error('请在设置中重新保存直播提醒并允许访问 B站直播接口。');
-    }
-    const rooms = liveFromResponse(await api('/xlive/web-ucenter/v1/xfetter/GetWebList?hit_ab=true', LIVE_ORIGIN));
+    const rooms = await liveRooms();
     const previous = new Set(state.liveRooms ?? []);
     const ready = state.liveRooms !== null;
     const fresh = ready ? rooms.filter(room => !previous.has(room.id)) : [];
@@ -206,19 +226,44 @@ async function saveSettings(input) {
   return { settings, state };
 }
 
-async function testNotification() {
-  await currentAccount();
-  const data = await feed('video');
-  if (!Array.isArray(data?.items)) throw new Error('B站未返回关注视频列表。');
-  const latest = data.items.map(videoFromItem).filter(Boolean).sort((a, b) => b.published - a.published)[0];
-  if (!latest) throw new Error('关注流里没有可用于测试的视频。');
-  // 每次创建新测试通知。用 BV 号点击直达视频，不写入检查状态。
+async function latestTestPost(kind) {
+  const video = kind === 'video';
+  const maxPages = video ? 1 : (await read()).settings.maxPages;
+  const offsets = new Set();
+  let offset = '';
+  for (let page = 1; page <= maxPages; page++) {
+    const data = await feed(video ? 'video' : 'all', offset);
+    if (!Array.isArray(data?.items)) throw new Error('B站未返回有效的关注动态列表。');
+    const latest = data.items.map(video ? videoFromItem : dynamicFromItem).filter(Boolean)
+      .sort((a, b) => b.published - a.published)[0];
+    if (latest) return latest;
+    if (!data.has_more || page === maxPages) break;
+    if (!data.offset || offsets.has(String(data.offset))) throw new Error('B站关注流分页异常，请稍后重试。');
+    offset = String(data.offset);
+    offsets.add(offset);
+  }
+  throw new Error(video ? '关注流里没有可用于测试的视频。' : '已检查的关注流里没有可用于测试的普通动态。');
+}
+
+async function testNotification(kind = 'video', demo = false) {
+  if (!KINDS.includes(kind) || (demo && kind !== 'live')) throw new Error('测试类型无效。');
+  let item;
+  if (demo) {
+    item = { kind, id: 'demo', author: '示例 UP 主', title: '示例直播间 · 点击返回扩展设置' };
+  } else {
+    await currentAccount();
+    item = kind === 'live' ? (await liveRooms())[0] : await latestTestPost(kind);
+    if (!item) return { noLive: true };
+  }
+  // 仅替换同类型的测试横幅，正式通知与检查状态均不受影响。
   const active = await chrome.notifications.getAll();
   for (const id of Object.keys(active)) {
-    if (id === 'test' || id.startsWith('test:')) await chrome.notifications.clear(id);
+    if (id.startsWith(`test:${kind}:`) || (kind === 'video' && (id === 'test' || id.startsWith('test:BV')))) {
+      await chrome.notifications.clear(id);
+    }
   }
-  await notify(latest, `test:${latest.id}:${crypto.randomUUID()}`, false, true);
-  return { title: latest.title };
+  await notify(item, `test:${kind}:${item.id}:${crypto.randomUUID()}`, false, demo ? '【测试·演示样例】' : '【测试】');
+  return { title: item.title };
 }
 async function initialize() {
   await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
@@ -233,10 +278,11 @@ chrome.alarms.onAlarm.addListener(alarm => {
 });
 chrome.action.onClicked.addListener(() => { void chrome.runtime.openOptionsPage(); });
 chrome.notifications.onClicked.addListener(id => {
-  const [kind, itemId] = id.split(':');
-  const url = itemUrl(kind === 'test' ? 'video' : kind, itemId);
+  const [kind, itemId, testId] = id.split(':');
+  const test = kind === 'test';
+  const url = test && KINDS.includes(itemId) ? itemUrl(itemId, testId) : itemUrl(test ? 'video' : kind, itemId);
   if (url) void chrome.tabs.create({ url });
-  else if (kind === 'test') void chrome.runtime.openOptionsPage();
+  else if (test) void chrome.runtime.openOptionsPage();
   void chrome.notifications.clear(id);
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -254,15 +300,17 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     respond({ error: '消息来源不是本扩展的设置页，请关闭此页后重新点击扩展图标打开。' });
     return;
   }
-  serial(async () => {
+  // 关注面板逐页读取，与检查和保存共用接口凭据，无需排队等待状态写入。
+  const operation = message.type === 'followings' ? followingPage(message.page, message.account) : serial(async () => {
     switch (message.type) {
       case 'status': return read();
       case 'check': return check(true);
       case 'save': return saveSettings(message.settings);
-      case 'test': return testNotification();
+      case 'test': return testNotification(message.kind, message.demo === true);
       default: throw new Error('未知操作');
     }
-  }).then(result => respond({ result }), error => respond({ error: error.message }));
+  });
+  operation.then(result => respond({ result }), error => respond({ error: error.message }));
   return true;
 });
 // 后台可能被浏览器回收；每次唤醒都确认定时任务仍然存在。

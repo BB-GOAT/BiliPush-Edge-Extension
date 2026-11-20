@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 
 const root = new URL('../', import.meta.url);
 const optionsPage = 'src/options/settings.html';
-const { normalizeSettings, videoFromItem, scanFeed } = await import(new URL('src/core.js', root));
+const { normalizeSettings, videoFromItem, scanFeed, followingFromItem } = await import(new URL('src/core.js', root));
 let checks = 0;
 function equal(actual, expected) {
   assert.deepEqual(actual, expected);
@@ -41,6 +41,11 @@ equal(normalizeSettings({ mode: 'selected', uids: ['10', 'abc', '10'] }).rules, 
 });
 equal(videoFromItem({ ...item(1), type: 'DYNAMIC_TYPE_FORWARD' }), null);
 equal(videoFromItem({ type: 'DYNAMIC_TYPE_AV' }), null);
+equal(followingFromItem({ mid: 42, uname: ' 示例 UP ', face: 'http://i1.hdslb.com/bfs/face/sample.png' }),
+  { uid: '42', name: '示例 UP', avatar: 'https://i1.hdslb.com/bfs/face/sample.png' });
+equal(followingFromItem({ mid: '42', face: 'https://i1.hdslb.com.example.test/bfs/face/sample.png' }),
+  { uid: '42', name: 'UID 42', avatar: '' });
+equal(followingFromItem({ mid: Number.MAX_SAFE_INTEGER + 1 }), null);
 
 let calls = 0;
 let scan = await scanFeed(async () => {
@@ -79,6 +84,9 @@ let apiFailure = false;
 let missingLivePermission = false;
 let liveFailure = false;
 let liveCalls = 0;
+const followingCalls = [];
+const followingPages = new Map();
+const dynamicPages = new Map();
 const event = () => ({ addListener(listener) { this.listener = listener; } });
 
 globalThis.chrome = {
@@ -147,6 +155,15 @@ globalThis.fetch = async url => {
       if (parsed.hostname === 'api.live.bilibili.com') {
         return liveFailure ? { code: -412 } : { code: 0, data: { rooms } };
       }
+      if (parsed.pathname === '/x/relation/followings') {
+        const query = Object.fromEntries(parsed.searchParams);
+        followingCalls.push(query);
+        return { code: 0, data: followingPages.get(query.pn) };
+      }
+      if (parsed.searchParams.get('type') === 'all') {
+        const page = dynamicPages.get(parsed.searchParams.get('offset') ?? '');
+        if (page) return { code: 0, data: page };
+      }
       return { code: 0, data: parsed.pathname.endsWith('/nav')
         ? { isLogin: true, mid, uname: '测试账号' }
         : { items: parsed.searchParams.get('type') === 'all' ? [...dynamics, ...feed] : feed, has_more: false } };
@@ -197,6 +214,34 @@ await message('check');
 equal(sent.length, 2);
 equal(store.state.account, '200');
 
+// 面板只能查询当前账号，后续页发现账号切换时不混入其他账号列表。
+const beforeFollowing = structuredClone(store);
+followingPages.set('1', { total: 51, list: Array.from({ length: 50 }, (_, index) => ({
+  mid: index + 10, uname: `测试关注 ${index + 1}`
+})) });
+followingPages.set('2', { total: 51, list: [{ mid: '60', uname: '第二页关注' }] });
+const firstFollowing = await message('followings', { page: 1 });
+equal(firstFollowing.account, '200');
+equal(firstFollowing.total, 51);
+equal(firstFollowing.hasMore, true);
+equal(firstFollowing.people.length, 50);
+equal(await message('followings', { page: 2, account: firstFollowing.account }), {
+  account: '200', total: 51, hasMore: false, people: [{ uid: '60', name: '第二页关注', avatar: '' }]
+});
+equal(followingCalls, [1, 2].map(page => ({ vmid: '200', pn: String(page), ps: '50', order: 'desc' })));
+mid = '300';
+equal(await message('followings', { page: 2, account: firstFollowing.account }), { accountChanged: true });
+equal(followingCalls.length, 2);
+mid = '200';
+await assert.rejects(message('followings', { page: 2 }), /页码无效/);
+checks++;
+followingPages.set('1', { total: 0, list: [] });
+equal(await message('followings', { page: 1 }), { account: '200', total: 0, hasMore: false, people: [] });
+followingPages.set('1', { total: 51, list: null });
+await assert.rejects(message('followings', { page: 1 }), /有效的关注列表/);
+checks++;
+equal(store, beforeFollowing);
+
 // 连续失败退避，成功后恢复正常间隔。
 apiFailure = true;
 await message('check');
@@ -237,7 +282,7 @@ const beforeTest = structuredClone(store);
 feed = [item(6), item(7), ...feed.slice(1)];
 equal(await message('test'), { title: '视频 7' });
 const firstTest = sent.at(-1).id;
-equal(firstTest.startsWith('test:BV0000000007:'), true);
+equal(firstTest.startsWith('test:video:BV0000000007:'), true);
 equal(sent.at(-1).title, '【测试】测试UP 投稿了新视频');
 equal(sent.at(-1).message, '视频 7');
 equal(cleared.includes('test'), true);
@@ -253,6 +298,53 @@ chrome.notifications.onClicked.listener('video:BV0000000006');
 equal(opened.at(-1).url, 'https://www.bilibili.com/video/BV0000000006/');
 equal(store, beforeTest);
 equal(liveCalls, 0);
+
+// 测试动态跳过纯视频首页，测试直播跳过未开播房间，两者都不消耗正式检查记录。
+await message('test', { kind: 'video' });
+const previewVideo = sent.at(-1).id;
+dynamicPages.set('', { items: [item(7), dynamic(8, '30', 'DYNAMIC_TYPE_LIVE_RCMD')], has_more: true, offset: 'next' });
+dynamicPages.set('next', { items: [dynamic(1), dynamic(2), item(6)], has_more: false });
+equal(await message('test', { kind: 'dynamic' }), { title: '动态 2' });
+const firstPreviewDynamic = sent.at(-1).id;
+equal(firstPreviewDynamic.startsWith('test:dynamic:2002:'), true);
+equal(sent.at(-1).title, '【测试】动态作者 发布了新动态');
+await message('test', { kind: 'dynamic' });
+const previewDynamic = sent.at(-1).id;
+equal(previewDynamic !== firstPreviewDynamic, true);
+equal(activeNotifications.has(firstPreviewDynamic), false);
+equal(activeNotifications.has(previewVideo), true);
+chrome.notifications.onClicked.listener(previewDynamic);
+equal(opened.at(-1).url, 'https://t.bilibili.com/2002');
+chrome.notifications.onClicked.listener('test:BV0000000007:legacy');
+equal(opened.at(-1).url, 'https://www.bilibili.com/video/BV0000000007/');
+dynamicPages.clear();
+await assert.rejects(message('test', { kind: 'dynamic' }), /没有可用于测试的普通动态/);
+checks++;
+
+missingLivePermission = true;
+await assert.rejects(message('test', { kind: 'live' }), /允许访问 B站直播接口/);
+checks++;
+missingLivePermission = false;
+rooms = [room(1, '30', 0), room(2)];
+equal(await message('test', { kind: 'live' }), { title: '直播 2' });
+const previewLive = sent.at(-1).id;
+equal(previewLive.startsWith('test:live:3002:'), true);
+equal(sent.at(-1).title, '【测试】主播 开播了');
+chrome.notifications.onClicked.listener(previewLive);
+equal(opened.at(-1).url, 'https://live.bilibili.com/3002');
+rooms = [];
+const beforeEmptyLive = sent.length;
+equal(await message('test', { kind: 'live' }), { noLive: true });
+equal(sent.length, beforeEmptyLive);
+const beforeDemo = liveCalls;
+await message('test', { kind: 'live', demo: true });
+const previewDemo = sent.at(-1).id;
+equal(liveCalls, beforeDemo);
+equal(previewDemo.startsWith('test:live:demo:'), true);
+equal(sent.at(-1).title, '【测试·演示样例】示例 UP 主 开播了');
+chrome.notifications.onClicked.listener(previewDemo);
+equal(opened.at(-1), 'options');
+equal(store, beforeTest);
 
 // 新增类别各自建立基线，不能改写已保存的投稿进度。
 const rules = {
@@ -373,8 +465,8 @@ equal(externalResponse, false);
 const manifest = JSON.parse(await fs.readFile(new URL('manifest.json', root), 'utf8'));
 for (const file of [
   'src/background.js', 'src/core.js', 'src/options/settings.html',
-  'src/options/settings.js', 'src/options/settings.css', 'assets/icon.png'
+  'src/options/settings.js', 'src/options/follow-picker.js', 'src/options/settings.css', 'assets/icon.png'
 ]) await fs.access(new URL(file, root));
 equal(manifest.manifest_version, 3);
 equal(manifest.permissions.includes('cookies'), false);
-console.log(`PASS: ${checks} 项断言，覆盖定时投稿、动态、开播、独立范围、基线、退避、通知、图标和消息校验。`);
+console.log(`PASS: ${checks} 项断言，覆盖关注分页、三类测试通知、定时提醒、独立范围、基线、退避、图标和消息校验。`);
