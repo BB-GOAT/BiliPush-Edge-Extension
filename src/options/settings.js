@@ -15,6 +15,7 @@ const compactTime = value => {
 const CHECK_LABELS = { ...KIND_LABELS, account: '登录检查', notification: '通知发送', check: '扩展运行', quick: '快速检查' };
 const TRIGGER_LABELS = { alarm: '定时检查', manual: '手动检查', startup: 'Edge 启动',
   installed: '安装或更新后检查', quick: '快速检查发现更新' };
+const QUICK_RESULTS = { unchanged: '首页无新条目', changed: '首页有新条目', first: '首次读取首页', error: '请求失败' };
 const issueText = ({ message, code }) => code && !message.includes(code)
   ? `${message.replace(/。$/, '')}（${code}）。`
   : message;
@@ -80,9 +81,14 @@ function renderStatus(settings, state) {
   }
   const quick = $('next-quick');
   const quickAt = state.quick?.next;
-  quick.textContent = !settings.enabled || !settings.quickCheck || !kinds.some(kind => kind !== 'live')
-    ? '已关闭' : quickAt ? new Date(quickAt).toLocaleTimeString('zh-CN', { hour12: false }) : '等待完整检查';
+  const quickEnabled = settings.enabled && settings.quickCheck && kinds.some(kind => kind !== 'live');
+  const shortTime = value => new Date(value).toLocaleTimeString('zh-CN', { hour12: false });
+  quick.textContent = !quickEnabled ? '已关闭' : quickAt ? shortTime(quickAt) : '等待完整检查';
   quick.title = quickAt ? time(quickAt) : '';
+  const result = $('quick-result');
+  const label = QUICK_RESULTS[state.quick?.result];
+  result.hidden = !quickEnabled || !state.quick?.lastAt || !label;
+  if (!result.hidden) result.textContent = `${shortTime(state.quick.lastAt)} · ${label}`;
   const trigger = $('attempt-trigger');
   trigger.textContent = TRIGGER_LABELS[state.lastTrigger] ?? '';
   trigger.hidden = !trigger.textContent;
