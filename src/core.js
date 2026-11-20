@@ -2,12 +2,21 @@ export const KINDS = ['video', 'dynamic', 'live'];
 export const KIND_LABELS = { video: '视频投稿', dynamic: '普通动态', live: '直播开播' };
 export const LIVE_ORIGIN = 'https://api.live.bilibili.com';
 export const LIVE_PERMISSION = { origins: [`${LIVE_ORIGIN}/*`] };
+export const ISSUE_LIMITS = [20, 50, 100];
 const DYNAMIC_TYPES = new Set([
   'DYNAMIC_TYPE_WORD', 'DYNAMIC_TYPE_DRAW', 'DYNAMIC_TYPE_FORWARD', 'DYNAMIC_TYPE_ARTICLE',
   'DYNAMIC_TYPE_OPUS'
 ]);
 const BV = /^BV[A-Za-z0-9]{10}$/;
 const DIGITS = /^[1-9]\d{0,19}$/;
+
+export class CheckError extends Error {
+  constructor(category, message, code = null) {
+    super(message);
+    this.category = category;
+    this.code = code;
+  }
+}
 
 function normalizeRule(input, fallback) {
   const mode = ['all', 'selected', 'off'].includes(input?.mode) ? input.mode : fallback;
@@ -28,7 +37,8 @@ export function normalizeSettings(input = {}) {
       live: normalizeRule(input.rules?.live, 'off')
     },
     silent: input.silent === true,
-    maxPages: number(input.maxPages ?? 5, 5, 1, 10)
+    maxPages: number(input.maxPages ?? 5, 5, 1, 10),
+    issueLimit: ISSUE_LIMITS.includes(input.issueLimit) ? input.issueLimit : 50
   };
 }
 
@@ -96,13 +106,13 @@ export function dynamicFeedId(item) {
 
 export function liveFromResponse(data) {
   const list = Array.isArray(data?.rooms) ? data.rooms : data?.list;
-  if (!Array.isArray(list)) throw new Error('B站没有返回关注直播列表。');
+  if (!Array.isArray(list)) throw new CheckError('response', 'B 站没有返回关注直播列表。');
   const rooms = new Map();
   for (const room of list) {
     if (String(room?.live_status) !== '1') continue;
     const id = numericId(room.room_id) || numericId(room.roomid);
     const uid = numericId(room.uid);
-    if (!id || !uid) throw new Error('B站直播列表缺少有效的房间号或 UID。');
+    if (!id || !uid) throw new CheckError('response', 'B 站直播列表缺少有效的房间号或 UID。');
     rooms.set(id, { kind: 'live', id, uid,
       author: String(room.uname || room.nickname || `UID ${uid}`),
       title: String(room.title || room.roomname || '点击进入直播间') });
@@ -126,7 +136,7 @@ export async function scanFeed(getPage, previousIds, maxPages, parseItem = video
   let pages = 0;
   for (; pages < maxPages;) {
     const data = await getPage(offset);
-    if (!Array.isArray(data.items)) throw new Error('B站返回的数据格式发生变化：缺少动态列表。');
+    if (!Array.isArray(data?.items)) throw new CheckError('response', 'B 站返回的数据缺少动态列表。');
     pages++;
     for (const item of data.items) {
       const record = parseItem(item);
@@ -144,7 +154,7 @@ export async function scanFeed(getPage, previousIds, maxPages, parseItem = video
       break;
     }
     if (!data.offset || offsets.has(String(data.offset))) {
-      throw new Error('B站分页游标异常，本次检查未提交，稍后重试。');
+      throw new CheckError('pagination', 'B 站关注流分页异常，请稍后重试。');
     }
     offset = String(data.offset);
     offsets.add(offset);

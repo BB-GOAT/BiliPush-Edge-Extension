@@ -5,6 +5,17 @@ const $ = id => document.getElementById(id);
 let busy = false;
 let loaded = false;
 const time = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
+const compactTime = value => {
+  if (!value) return '—';
+  const date = new Date(value);
+  return date.toDateString() === new Date().toDateString()
+    ? date.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+    : time(value);
+};
+const CHECK_LABELS = { ...KIND_LABELS, account: '登录检查', notification: '通知发送', check: '扩展运行' };
+const issueText = ({ message, code }) => code && !message.includes(code)
+  ? `${message.replace(/。$/, '')}（${code}）。`
+  : message;
 const ruleFields = {};
 const picker = createFollowPicker({
   loadPage: (page, account) => send('followings', { page, account }),
@@ -47,7 +58,96 @@ async function send(type, data = {}) {
   if (!response || !('result' in response)) throw new Error('扩展后台没有响应，请在扩展管理页重新加载。');
   return response.result;
 }
-function render({ settings, state }, fill = false) {
+
+function renderStatus(settings, state) {
+  const kinds = KINDS.filter(kind => settings.rules[kind].mode !== 'off');
+  const waiting = kinds.filter(kind => state.sources[kind]?.error).length;
+  const globalIssues = Object.entries(state.globalIssues ?? {});
+  const legacyError = state.failures && !globalIssues.length ? state.error : '';
+  const warning = waiting > 0 || globalIssues.length > 0 || Boolean(legacyError);
+  const badge = $('badge');
+  badge.textContent = !settings.enabled ? '已暂停' : !kinds.length ? '全部关闭'
+    : globalIssues.length || legacyError ? '需要检查' : waiting ? `${waiting} 项等待重试`
+      : state.lastSuccess ? '自动检查中' : '等待首次检查';
+  badge.classList.toggle('warning', Boolean(kinds.length && warning));
+  $('account').textContent = state.account ? `${state.accountName}（${state.account}）` : '尚未确认登录';
+  const next = settings.enabled && kinds.length ? state.nextCheck : null;
+  for (const [id, value] of [['attempt', state.lastAttempt], ['next', next]]) {
+    $(id).textContent = compactTime(value);
+    $(id).title = value ? time(value) : '';
+  }
+
+  const alert = $('error');
+  alert.replaceChildren();
+  alert.hidden = !kinds.length || !(globalIssues.length || legacyError);
+  for (const [source, issue] of globalIssues) {
+    const detail = document.createElement('p');
+    detail.textContent = `${CHECK_LABELS[source]} · ${issueText(issue)} · ${compactTime(issue.at)}失败 · 连续 ${issue.failures} 次`;
+    alert.append(detail);
+  }
+  if (legacyError) alert.textContent = legacyError;
+
+  $('sources').replaceChildren();
+  for (const kind of KINDS) {
+    const entry = state.sources[kind];
+    const enabled = kinds.includes(kind);
+    const failed = enabled && Boolean(entry?.error);
+    const row = $('source-template').content.cloneNode(true);
+    const card = row.firstElementChild;
+    card.classList.toggle('source-warning', failed);
+    card.classList.toggle('source-ok', enabled && Boolean(entry) && !failed);
+    row.querySelector('.source-title').textContent = KIND_LABELS[kind];
+    row.querySelector('.source-state').textContent = !enabled ? '已关闭' : failed
+      ? settings.enabled ? '等待重试' : '上次失败' : entry ? '正常' : '等待首次检查';
+    const meta = row.querySelector('.source-meta');
+    const success = entry?.lastSuccess ? `上次成功 ${compactTime(entry.lastSuccess)}` : '';
+    const note = row.querySelector('.source-note');
+    if (failed) {
+      const detail = row.querySelector('.source-error');
+      detail.textContent = entry.issue ? issueText(entry.issue) : entry.error;
+      detail.hidden = false;
+      meta.textContent = [entry.lastAttempt ? `${compactTime(entry.lastAttempt)} 失败` : '',
+        `连续 ${entry.failures} 次`, success || '暂无成功时间'].filter(Boolean).join(' · ');
+      const retry = row.querySelector('.source-retry');
+      retry.hidden = !settings.enabled || !entry.retryAt;
+      retry.querySelector('strong').textContent = entry.retryAt > Date.now()
+        ? `${compactTime(entry.retryAt)} 后可重试` : '已到可重试时间';
+      retry.querySelector('span').textContent = !state.nextCheck ? '' : Math.max(state.nextCheck, Date.now()) < entry.retryAt
+        ? `下轮自动检查会跳过${KIND_LABELS[kind]}` : '等待下轮自动检查';
+    } else if (enabled) {
+      meta.textContent = success || (entry ? '暂无成功时间' : '尚未完成检查');
+      meta.title = entry?.lastSuccess ? time(entry.lastSuccess) : '';
+      note.textContent = entry?.note ?? '';
+      note.hidden = !entry?.note;
+    }
+    $('sources').append(row);
+  }
+}
+
+function renderDiagnostics(settings, { entries, available }) {
+  $('issue-limit').value = settings.issueLimit;
+  $('issue-count').textContent = available ? `${entries.length} 条记录` : '记录暂不可用';
+  $('issue-empty').hidden = entries.length > 0 || !available;
+  $('issues').hidden = entries.length === 0;
+  const feedback = $('issue-feedback');
+  feedback.textContent = available ? '' : '当前无法保存或读取会话内记录，仍可在运行状态中查看最新错误。';
+  feedback.hidden = available;
+  const list = $('issue-list');
+  list.replaceChildren();
+  for (const { source, issue, firstAt, lastAt, count } of entries) {
+    const row = list.insertRow();
+    const when = row.insertCell();
+    when.textContent = count > 1 ? `${compactTime(firstAt)}～${compactTime(lastAt)}` : compactTime(lastAt);
+    when.title = count > 1 ? `${time(firstAt)}～${time(lastAt)}` : time(lastAt);
+    row.insertCell().textContent = CHECK_LABELS[source];
+    const result = row.insertCell();
+    result.className = issue ? 'issue-failed' : 'issue-recovered';
+    result.textContent = issue ? issueText(issue) : '已恢复';
+    row.insertCell().textContent = issue ? `${count} 次` : '—';
+  }
+}
+
+function render({ settings, state, diagnostics }, fill = false) {
   if (fill) {
     for (const key of ['interval', 'maxPages']) $(key).value = settings[key];
     for (const key of ['enabled', 'silent']) $(key).checked = settings[key];
@@ -58,17 +158,10 @@ function render({ settings, state }, fill = false) {
       field.sync();
     }
     loaded = true;
+    $('issue-limit').disabled = false;
   }
-  const hasRules = KINDS.some(kind => settings.rules[kind].mode !== 'off');
-  $('badge').textContent = !settings.enabled ? '已暂停' : !hasRules ? '全部关闭' : state.error ? '需要检查'
-    : state.lastSuccess ? '自动检查中' : '等待首次检查';
-  $('account').textContent = state.account ? `${state.accountName}（${state.account}）` : '尚未确认登录';
-  $('attempt').textContent = time(state.lastAttempt);
-  $('success').textContent = time(state.lastSuccess);
-  $('next').textContent = settings.enabled && hasRules ? time(state.nextCheck) : '—';
-  $('note').textContent = hasRules ? (state.note || '点击“立即检查”确认登录并读取已开启的提醒。') : '请先选择要接收的提醒。';
-  $('error').hidden = !state.error || !hasRules;
-  $('error').textContent = state.error ?? '';
+  renderStatus(settings, state);
+  renderDiagnostics(settings, diagnostics);
   $('history').replaceChildren();
   if (!state.history.length) $('history').textContent = '暂无记录。';
   for (const record of state.history) {
@@ -153,11 +246,31 @@ function test(kind, demo = false) {
 }
 for (const kind of KINDS) $(`test-${kind}`).addEventListener('click', () => test(kind));
 $('test-live-demo').addEventListener('click', () => test('live', true));
+$('issue-limit').addEventListener('change', async event => {
+  const select = event.currentTarget;
+  const limit = Number(select.value);
+  select.disabled = true;
+  try { render(await send('issue-limit', { limit })); }
+  catch (error) {
+    try { render(await send('status')); }
+    catch {}
+    $('issue-feedback').textContent = error.message;
+    $('issue-feedback').hidden = false;
+  } finally {
+    select.disabled = false;
+  }
+});
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes.state && loaded) void send('status').then(result => render(result)).catch(() => {});
+  if (area === 'local' && (changes.state || changes.settings) && loaded) {
+    void send('status').then(result => render(result)).catch(() => {});
+  }
 });
 send('status').then(result => render(result, true)).catch(error => {
   $('badge').textContent = '连接失败';
   $('error').hidden = false;
   $('error').textContent = error.message;
+  $('issue-count').textContent = '记录暂不可用';
+  $('issue-empty').hidden = true;
+  $('issue-feedback').hidden = false;
+  $('issue-feedback').textContent = '后台未连接，无法读取会话内记录。';
 });

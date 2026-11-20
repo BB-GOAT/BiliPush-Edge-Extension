@@ -36,6 +36,8 @@ function room(number, uid = '30', status = 1) {
 // 设置边界、原创投稿与分页。
 equal(normalizeSettings({ interval: 0 }).interval, 1);
 equal(normalizeSettings({ maxPages: 99 }).maxPages, 10);
+equal(normalizeSettings({}).issueLimit, 50);
+equal(normalizeSettings({ issueLimit: 99 }).issueLimit, 50);
 equal(normalizeSettings({ mode: 'selected', uids: ['10', 'abc', '10'] }).rules, {
   video: { mode: 'selected', uids: ['10'] }, dynamic: { mode: 'off', uids: [] }, live: { mode: 'off', uids: [] }
 });
@@ -70,6 +72,7 @@ checks++;
 
 // 后台集成模拟：存储、定时任务、通知、消息与 B站响应均留在本进程。
 const store = { settings: { mode: 'all', uids: ['77'] } };
+const sessionStore = {};
 const alarms = new Map();
 const sent = [];
 const activeNotifications = new Map();
@@ -83,6 +86,9 @@ let rooms = [];
 let apiFailure = false;
 let missingLivePermission = false;
 let liveFailure = false;
+let liveHttpStatus = 0;
+let dynamicError;
+let unavailableSession = false;
 let liveCalls = 0;
 const followingCalls = [];
 const followingPages = new Map();
@@ -100,6 +106,13 @@ globalThis.chrome = {
       },
       async set(value) { Object.assign(store, structuredClone(value)); },
       async setAccessLevel() {}
+    },
+    session: {
+      async get(key) { return structuredClone({ [key]: sessionStore[key] }); },
+      async set(value) {
+        if (unavailableSession) throw Error('会话存储不可用');
+        Object.assign(sessionStore, structuredClone(value));
+      }
     }
   },
   alarms: {
@@ -150,13 +163,17 @@ globalThis.chrome = {
 };
 globalThis.fetch = async (url, options) => {
   const parsed = new URL(url);
-  if (parsed.hostname === 'api.live.bilibili.com') liveCalls++;
+  if (parsed.hostname === 'api.live.bilibili.com') {
+    liveCalls++;
+    if (liveHttpStatus) return { ok: false, status: liveHttpStatus };
+  }
+  if (parsed.searchParams.get('type') === 'all' && dynamicError) throw dynamicError;
   return {
     ok: true,
     async json() {
       if (apiFailure) return { code: -101 };
       if (parsed.hostname === 'api.live.bilibili.com') {
-        return liveFailure ? { code: -412 } : { code: 0, data: { rooms } };
+        return liveFailure ? { code: -412, message: '模拟服务端原始响应，不应被保存' } : { code: 0, data: { rooms } };
       }
       if (parsed.pathname === '/x/relation/followings') {
         const query = Object.fromEntries(parsed.searchParams);
@@ -279,14 +296,19 @@ equal(store, beforeFollowing);
 apiFailure = true;
 await message('check');
 equal(store.state.failures, 1);
+equal(store.state.globalIssues.account.category, 'login');
+equal(sessionStore.recentIssues.entries.at(-1).issue.code, '-101');
 equal(Math.round((store.state.nextCheck - Date.now()) / 60000), 14);
 await message('check');
 equal(store.state.failures, 2);
+equal(sessionStore.recentIssues.entries.at(-1).count, 2);
 equal(Math.round((store.state.nextCheck - Date.now()) / 60000), 28);
 apiFailure = false;
 await message('check');
 equal(store.state.failures, 0);
 equal(store.state.error, '');
+equal(sessionStore.recentIssues.entries.at(-1).source, 'account');
+equal(sessionStore.recentIssues.entries.at(-1).issue, null);
 
 // 暂停取消定时任务，但仍允许手动检查。
 await message('save', { settings: { enabled: false } });
@@ -302,9 +324,12 @@ notificationFail = true;
 feed = [item(6), ...feed];
 await message('check');
 equal(store.state.pending.length, 1);
+equal(sessionStore.recentIssues.entries.at(-1).issue.category, 'notification');
 notificationFail = false;
 await message('check');
 equal(store.state.pending.length, 0);
+equal(sessionStore.recentIssues.entries.at(-1).source, 'notification');
+equal(sessionStore.recentIssues.entries.at(-1).issue, null);
 equal(sent.at(-1).id, 'video:BV0000000006');
 await message('check');
 equal(sent.filter(notification => notification.id === 'video:BV0000000006').length, 1);
@@ -312,6 +337,7 @@ equal(sent.filter(notification => notification.id === 'video:BV0000000006').leng
 // 连续点击均创建新通知，清理旧测试提醒但保留真实视频通知。
 activeNotifications.set('test', { message: '旧版测试通知' });
 const beforeTest = structuredClone(store);
+const beforeTestIssues = structuredClone(sessionStore);
 feed = [item(6), item(7), ...feed.slice(1)];
 equal(await message('test'), { title: '视频 7' });
 const firstTest = sent.at(-1).id;
@@ -330,6 +356,7 @@ equal(opened.at(-1).url, 'https://www.bilibili.com/video/BV0000000007/');
 chrome.notifications.onClicked.listener('video:BV0000000006');
 equal(opened.at(-1).url, 'https://www.bilibili.com/video/BV0000000006/');
 equal(store, beforeTest);
+equal(sessionStore, beforeTestIssues);
 equal(liveCalls, 0);
 
 // 测试动态跳过纯视频首页，测试直播跳过未开播房间，两者都不消耗正式检查记录。
@@ -378,6 +405,7 @@ equal(sent.at(-1).title, '【测试·演示样例】示例 UP 主 开播了');
 chrome.notifications.onClicked.listener(previewDemo);
 equal(opened.at(-1), 'options');
 equal(store, beforeTest);
+equal(sessionStore, beforeTestIssues);
 
 // 新增类别各自建立基线，不能改写已保存的投稿进度。
 const rules = {
@@ -422,23 +450,33 @@ equal(sent.at(-1).id !== firstLive, true);
 
 // 部分接口与权限失败时，投稿仍然可发，失败不会覆盖直播快照。
 liveFailure = true;
+const lastLiveSuccess = store.state.sources.live.lastSuccess;
 feed = [item(10), ...feed];
 await message('check');
 equal(sent.at(-1).id, 'video:BV0000000010');
 equal(store.state.error.includes('直播开播'), true);
 equal(store.state.liveRooms, ['3001', '3002']);
+equal(store.state.sources.live.lastSuccess, lastLiveSuccess);
+equal(store.state.sources.live.issue.category, 'rejected');
+equal(store.state.sources.live.issue.code, '-412');
+equal(JSON.stringify(sessionStore).includes('模拟服务端原始响应'), false);
+const beforeRetryIssues = structuredClone(sessionStore);
 liveFailure = false;
 const beforeRetry = liveCalls;
 chrome.alarms.onAlarm.listener({ name: 'check-videos' });
 await message('status');
 equal(liveCalls, beforeRetry);
+equal(sessionStore, beforeRetryIssues);
 missingLivePermission = true;
 await message('check');
 equal(liveCalls, beforeRetry);
 equal(store.state.error.includes('允许访问 B站直播接口'), true);
+equal(sessionStore.recentIssues.entries.at(-1).issue.category, 'permission');
 missingLivePermission = false;
 await message('check');
 equal(store.state.error, '');
+equal(sessionStore.recentIssues.entries.at(-1).source, 'live');
+equal(sessionStore.recentIssues.entries.at(-1).issue, null);
 
 // 关闭再开启只重新建立对应类别的基线。
 await message('save', { settings: { rules: { ...rules, live: { mode: 'off' } } } });
@@ -469,6 +507,91 @@ await message('check');
 equal(store.state.pending.length, 0);
 equal(sent.length, beforeEnded);
 
+// 自动检查仍会读取健康来源，异常记录跨来源按最后一次发生时间排列。
+await message('save', { settings: { interval: 3, rules } });
+liveHttpStatus = 429;
+await message('check');
+equal(store.state.sources.live.issue.category, 'rate-limit');
+equal(store.state.sources.live.issue.code, 'HTTP 429');
+equal(store.state.sources.live.retryAt - store.state.sources.live.lastAttempt, 6 * 60000);
+equal(store.state.nextCheck < store.state.sources.live.retryAt, true);
+dynamicError = new DOMException('模拟超时详情', 'TimeoutError');
+await message('check');
+let entries = (await message('status')).diagnostics.entries;
+equal(entries[0].source, 'live');
+equal(entries[0].count, 2);
+equal(entries[1].issue.category, 'timeout');
+equal(entries[1].issue.message, '请求超时。');
+dynamicError = new TypeError('模拟网络详情');
+await message('check');
+entries = (await message('status')).diagnostics.entries;
+equal(entries[0].count, 3);
+equal(entries[1].issue.category, 'network');
+equal(entries[1].count, 1);
+equal(JSON.stringify(sessionStore).includes('模拟'), false);
+equal(Object.hasOwn(store, 'recentIssues'), false);
+equal(Object.keys(entries[0]), ['source', 'issue', 'firstAt', 'lastAt', 'count']);
+dynamicError = undefined;
+liveHttpStatus = 0;
+await message('check');
+equal((await message('status')).diagnostics.entries.slice(0, 2).map(entry => [entry.source, entry.issue]),
+  [['live', null], ['dynamic', null]]);
+liveHttpStatus = 429;
+await message('check');
+equal((await message('status')).diagnostics.entries[0].count, 1);
+
+// 调整上限会立即丢弃最旧的记录，且不会重新安排下一次检查。
+for (let index = 0; index < 28; index++) {
+  liveHttpStatus = index % 2 ? 429 : 503;
+  await message('check');
+}
+equal(sessionStore.recentIssues.entries.length > 20, true);
+const alarmBeforeLimit = store.state.nextCheck;
+const latest20 = sessionStore.recentIssues.entries.slice(-20).reverse();
+const smaller = await message('issue-limit', { limit: 20 });
+equal(smaller.settings.issueLimit, 20);
+equal(smaller.diagnostics.entries, latest20);
+equal(store.state.nextCheck, alarmBeforeLimit);
+equal(sessionStore.recentIssues.entries.length, 20);
+await message('issue-limit', { limit: 100 });
+equal(sessionStore.recentIssues.entries.length, 20);
+await assert.rejects(message('issue-limit', { limit: 500 }), /有效的异常记录保留上限/);
+checks++;
+await message('save', { settings: { interval: 3, rules } });
+equal(store.settings.issueLimit, 100);
+await message('issue-limit', { limit: 20 });
+await message('check');
+equal(sessionStore.recentIssues.entries.length, 20);
+
+// 退出后历史不会由本地状态重建。会话异常不影响真实提醒或运行状态。
+delete sessionStore.recentIssues;
+equal((await message('status')).diagnostics, { entries: [], available: true });
+equal(store.state.sources.live.error.length > 0, true);
+unavailableSession = true;
+feed = [item(12), ...feed];
+const unavailable = await message('check');
+equal(unavailable.diagnostics.available, false);
+equal(sent.at(-1).id, 'video:BV0000000012');
+equal(unavailable.state.nextCheck < unavailable.state.sources.live.retryAt, true);
+unavailableSession = false;
+await message('check');
+equal((await message('status')).diagnostics.entries.length, 1);
+mid = '300';
+liveHttpStatus = 0;
+const previousScope = sessionStore.recentIssues.scope;
+unavailableSession = true;
+const newAccount = await message('check');
+equal(newAccount.state.account, '300');
+equal(newAccount.diagnostics.entries, []);
+equal(newAccount.state.diagnosticScope === previousScope, false);
+equal(sessionStore.recentIssues.scope, previousScope);
+unavailableSession = false;
+liveHttpStatus = 429;
+await message('check');
+equal(sessionStore.recentIssues.scope, newAccount.state.diagnosticScope);
+equal(sessionStore.recentIssues.entries.length, 1);
+liveHttpStatus = 0;
+
 // 设置页无 tab、携带查询/锚点时同样合法；相似地址与其他来源不能操作后台。
 equal((await request({ type: 'status' }, {
   id: chrome.runtime.id, url: chrome.runtime.getURL(optionsPage)
@@ -496,10 +619,14 @@ equal(chrome.runtime.onMessage.listener({ type: 'status' }, {
 equal(externalResponse, false);
 
 const manifest = JSON.parse(await fs.readFile(new URL('manifest.json', root), 'utf8'));
+const optionsHtml = await fs.readFile(new URL(optionsPage, root), 'utf8');
+equal(manifest.name, '哔哩哔哩推送');
+equal(manifest.description, '当关注的UP开播或更新视频/动态时发出Windows通知提醒');
+equal(optionsHtml.includes(`<h1>${manifest.name}</h1><p>${manifest.description}</p>`), true);
 for (const file of [
-  'src/background.js', 'src/core.js', 'src/options/settings.html',
+  'src/background.js', 'src/core.js', 'src/diagnostics.js', 'src/options/settings.html',
   'src/options/settings.js', 'src/options/follow-picker.js', 'src/options/settings.css', 'assets/icon.png'
 ]) await fs.access(new URL(file, root));
 equal(manifest.manifest_version, 3);
 equal(manifest.permissions.includes('cookies'), false);
-console.log(`PASS: ${checks} 项断言，覆盖关注分页、三类测试通知、定时提醒、独立范围、基线、退避、图标和消息校验。`);
+console.log(`PASS: ${checks} 项断言，覆盖关注分页、三类测试通知、定时提醒、独立范围、基线、退避、诊断记录、图标和消息校验。`);

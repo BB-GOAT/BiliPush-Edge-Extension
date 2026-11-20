@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "B站关注视频提醒",
+  "name": "哔哩哔哩推送",
   "version": "1.0.0",
-  "description": "复用 Edge 的 B站登录状态，在桌面接收关注 UP 主的视频、动态和开播提醒。",
+  "description": "当关注的UP开播或更新视频/动态时发出Windows通知提醒",
   "permissions": [
     "alarms",
     "storage",
@@ -19,7 +19,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "打开 B站视频提醒设置",
+    "default_title": "打开哔哩哔哩推送设置",
     "default_icon": "assets/icon.png"
   },
   "options_page": "src/options/settings.html",

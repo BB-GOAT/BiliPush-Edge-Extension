@@ -14,6 +14,64 @@
 .rule-selection { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 12px; }
 #check-feedback:empty { display: none; }
 
+.overview {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 13px 16px;
+  background: #f5f8fb;
+  border-radius: 9px;
+  gap: 10px 20px;
+}
+.overview dd { font-size: 14px; font-weight: 600; }
+#badge.warning { color: #844800; background: #fff1d9; }
+#error p { margin: 0; }
+#error p + p { margin-top: 6px; }
+#sources { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.source {
+  display: grid;
+  grid-template-columns: 126px minmax(0, 1fr) minmax(155px, max-content);
+  align-items: center;
+  gap: 16px;
+  padding: 9px 14px;
+  min-height: 61px;
+  border: 1px solid #e5ebf2;
+  border-radius: 8px;
+  font-size: 14px;
+}
+.source .hint { display: block; overflow-wrap: anywhere; }
+.source-state { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #64748b; }
+.source-state::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.source-warning { background: #fff8eb; border-color: #f3dfb5; }
+.source-error, .source-retry, .source-warning .source-state, .source-retry .hint, .issue-failed { color: #824700; }
+.source-retry { padding-left: 12px; border-left: 1px solid #ead8b5; }
+.source-retry .hint { font-size: 12px; }
+.source-ok .source-state, .issue-recovered { color: #24704e; }
+.anomalies { padding-top: 20px; padding-bottom: 20px; }
+.anomalies summary { display: flex; align-items: center; gap: 9px; list-style: none; cursor: pointer; }
+.anomalies summary::-webkit-details-marker { display: none; }
+.anomalies summary::before { content: ''; width: 7px; height: 7px; margin-right: 4px; border: solid #64748b; border-width: 0 2px 2px 0; transform: rotate(-45deg); }
+.anomalies details[open] summary::before { transform: rotate(45deg); margin-top: -4px; }
+.anomalies summary:focus-visible { outline: 3px solid #589edc; outline-offset: 5px; border-radius: 4px; }
+.anomalies summary h2 { margin: 0; }
+#issue-count { margin-left: auto; }
+.diagnostic-controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 13px; }
+.diagnostic-controls p { margin: 0; }
+.diagnostic-controls label { display: flex; align-items: center; flex: none; gap: 8px; margin: 0; font-size: 13px; }
+.diagnostic-controls select { width: auto; margin: 0; padding: 6px 8px; }
+#issues { width: 100%; border-collapse: collapse; margin-top: 13px; font-size: 14px; }
+#issues th { font-size: 12px; text-align: left; background: #f5f8fb; color: #52657a; }
+#issues th, #issues td { padding: 8px 11px; overflow-wrap: anywhere; }
+#issues td { border-top: 1px solid #edf1f6; }
+#issues :is(th, td):last-child { text-align: right; white-space: nowrap; }
+.issue-recovered { font-weight: 600; }
+@media (max-width: 630px) {
+  .overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .overview div:first-child { grid-column: 1 / -1; }
+  .source { grid-template-columns: 82px minmax(0, 1fr); gap: 6px 10px; align-items: start; }
+  .source-retry { grid-column: 2; border-left: 0; padding: 0; }
+  .diagnostic-controls { flex-direction: column; align-items: flex-start; }
+  #issues th, #issues td { padding: 6px; }
+}
+
 #follow-picker {
   width: min(620px, calc(100% - 28px));
   max-width: none;

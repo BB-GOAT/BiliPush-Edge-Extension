@@ -14,18 +14,21 @@
 
 ## 存储
 
-使用 `chrome.storage.local`，访问级别为 `TRUSTED_CONTEXTS`。顶层只有 `settings` 和 `state`。
+使用 `chrome.storage.local`，访问级别为 `TRUSTED_CONTEXTS`。顶层只有 `settings` 和 `state`。异常历史单独存储在 `chrome.storage.session`。
 
 | 字段 | 含义及约束 |
 | --- | --- |
 | settings.enabled / interval | 自动检查开关；间隔 1～60 分钟 |
 | settings.rules | `video`、`dynamic`、`live` 各自有 `mode`（`all`、`selected`、`off`）和字符串 UID 列表。升级时读取旧 `mode` / `uids` 作为 `video` |
 | settings.silent / maxPages | 静音；最大页数 1～10 |
+| settings.issueLimit | 会话异常记录上限，20、50 或 100 条，旧设置默认为 50 |
 | state.account / accountName | 当前账号 UID 与昵称，用于账号隔离和面板显示 |
 | state.seen / baseline | 最近最多 3000 个 BV 号；是否已建立基线 |
 | state.dynamicSeen / dynamicBaseline | 普通动态已扫过的关注流 ID，最多 3000 个；是否已建立动态基线 |
 | state.liveRooms | 最近一次成功查询的开播房间 ID；`null` 表示尚未建立基线 |
-| state.sources | 各类别的上次结果，或错误、连续失败次数和下次可重试时间 |
+| state.sources | 各类别的上次检查、上次成功、当前结果、连续失败次数及最早重试时间 |
+| state.globalIssues | 登录检查、通知发送和扩展运行的当前异常，恢复时移除 |
+| state.diagnosticScope | 随机隔离标记，确认切换账号时更换，防止显示上一账号的会话异常 |
 | state.pending / history | 待通知队列和最近最多 100 条检测记录。旧记录没有 `kind`，按视频兼容 |
 | state.failures / error / note | 连续失败次数、错误与说明 |
 | state.lastAttempt / lastSuccess / nextCheck | 毫秒时间戳；下次检查可为空 |
@@ -33,6 +36,8 @@
 记录共有 `kind`、`id`、`uid`、`author`、`title`。投稿或动态的 `published` 为秒，历史的 `detected` 为毫秒。直播通知队列项另含 `session`，用于区分同一房间先后开播产生的通知。链接根据类别和 ID 构造。
 
 新增可选字段应提供读取默认值。改变字段语义或结构时需要显式迁移方案与旧存储回归测试；不要借版本号修改自动清空数据。现有实现没有通用存储 schema 迁移框架，尚不需要为此额外引入基础设施。
+
+会话历史每条只保存来源、固定错误类别及可选状态码、首次和最后一次发生时间与次数。相同来源的连续同类错误合并，保留限额变化时立即剪裁。后台回收之后仍可读取，切换账号、重新加载扩展或结束浏览器会话时清空。存储不可用时仍可使用当前状态、定时检查和通知。
 
 ## 调度与通知
 
@@ -45,7 +50,7 @@
 
 ## 消息与输入边界
 
-设置页支持 `status`、`check`、`save`、`test`、`followings` 和 `whispers`。两种关注查询都只读取数据，无需等待状态写入队列；普通关注页码必须有效，目标账号由后台向 B站确认。后台校验 `sender.id` 和准确的设置页 URL（忽略查询与锚点），不能因为 `sender.tab` 存在就拒绝合法设置页。监听器返回 `true` 保持异步响应通道，并用 `{result}` 或 `{error}` 响应。
+设置页支持 `status`、`check`、`save`、`issue-limit`、`test`、`followings` 和 `whispers`。设置异常记录上限无需重新安排检查。两种关注查询都只读取数据，无需等待状态写入队列；普通关注页码必须有效，目标账号由后台向 B站确认。后台校验 `sender.id` 和准确的设置页 URL（忽略查询与锚点），不能因为 `sender.tab` 存在就拒绝合法设置页。监听器返回 `true` 保持异步响应通道，并用 `{result}` 或 `{error}` 响应。
 
 不接受页面提供的任意链接，展示文字使用 `textContent`。新增消息类型、权限或接口目标时同步修改测试与文档。`scripts/check.mjs` 固定检查当前最小权限清单；必要权限变化应经过明确说明后更新清单与测试。
 

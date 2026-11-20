@@ -2,15 +2,16 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>B站关注视频提醒 · 设置</title><link rel="stylesheet" href="settings.css">
+  <title>哔哩哔哩推送 · 设置</title><link rel="stylesheet" href="settings.css">
 </head>
 <body>
 <main>
-  <header><img src="../../assets/icon.png" alt="" width="52" height="52"><div><h1>B站关注视频提醒</h1><p>在桌面接收关注 UP 主的投稿、动态和开播提醒。</p></div></header>
+  <header><img src="../../assets/icon.png" alt="" width="52" height="52"><div><h1>哔哩哔哩推送</h1><p>当关注的UP开播或更新视频/动态时发出Windows通知提醒</p></div></header>
   <section aria-labelledby="status-title">
-    <div class="section-head"><h2 id="status-title">运行状态</h2><span id="badge">正在读取</span></div>
-    <dl><div><dt>当前账号</dt><dd id="account">尚未检查</dd></div><div><dt>上次尝试</dt><dd id="attempt">—</dd></div><div><dt>上次成功</dt><dd id="success">—</dd></div><div><dt>下次检查</dt><dd id="next">—</dd></div></dl>
-    <p id="note" class="hint"></p><p id="error" class="error" role="alert" hidden></p>
+    <div class="section-head"><h2 id="status-title">运行状态</h2><span id="badge" role="status">正在读取</span></div>
+    <dl class="overview"><div><dt>当前账号</dt><dd id="account">尚未检查</dd></div><div><dt>上次检查</dt><dd id="attempt">—</dd></div><div><dt>下次自动检查</dt><dd id="next">—</dd></div></dl>
+    <div id="error" class="error" role="alert" hidden></div>
+    <ul id="sources" aria-label="各类检查状态"></ul>
     <div class="buttons">
       <button id="check" type="button">立即检查</button>
       <button id="test-video" class="secondary" type="button">测试投稿</button>
@@ -21,11 +22,28 @@
     <p id="check-feedback" class="hint" role="status"></p>
     <button id="test-live-demo" class="secondary" type="button" hidden>发送演示通知</button>
   </section>
+  <section class="anomalies">
+    <details>
+      <summary><h2>最近异常</h2><span id="issue-count" class="hint"></span></summary>
+      <div class="diagnostic-controls">
+        <p class="hint">只记录失败和恢复，退出 Edge 或重新加载扩展后清空。</p>
+        <label>保留上限<select id="issue-limit" disabled>
+          <option value="20">20 条</option><option value="50" selected>50 条</option><option value="100">100 条</option>
+        </select></label>
+      </div>
+      <p id="issue-feedback" class="hint" role="status" hidden></p>
+      <p id="issue-empty" class="hint">暂无异常记录。</p>
+      <table id="issues" hidden>
+        <thead><tr><th scope="col">发生时间</th><th scope="col">检查项目</th><th scope="col">结果</th><th scope="col">次数</th></tr></thead>
+        <tbody id="issue-list"></tbody>
+      </table>
+    </details>
+  </section>
   <section aria-labelledby="settings-title">
     <h2 id="settings-title">提醒设置</h2>
     <form id="settings">
       <label class="toggle"><input id="enabled" type="checkbox">启用自动检查与通知</label>
-      <div class="fields"><label>检查间隔（分钟）<input id="interval" type="number" min="1" max="60" step="1" required><small>支持 1～60 分钟，默认 3 分钟。失败时自动延长至最多 60 分钟。</small></label>
+      <div class="fields"><label>检查间隔（分钟）<input id="interval" type="number" min="1" max="60" step="1" required><small>支持 1～60 分钟，默认 3 分钟。失败时最多延至 60 分钟，可在运行状态中查看原因和重试时间。</small></label>
       <label>视频和动态的检查页数<input id="maxPages" type="number" min="1" max="10" step="1" required><small>每类最多检查这么多页，默认 5 页。</small></label></div>
       <div id="rules"></div>
       <label class="toggle"><input id="silent" type="checkbox">静音通知（仍显示桌面横幅）</label>
@@ -71,6 +89,13 @@
     </div>
   </div>
 </dialog>
+<template id="source-template">
+  <li class="source">
+    <div><strong class="source-title"></strong><span class="source-state"></span></div>
+    <div><strong class="source-error" hidden></strong><span class="source-meta hint"></span><span class="source-note hint" hidden></span></div>
+    <div class="source-retry" hidden><strong></strong><span class="hint"></span></div>
+  </li>
+</template>
 <template id="rule-template">
   <fieldset class="rule">
     <legend></legend>

@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "B站关注视频提醒：本地维护工具，不参与扩展运行。",
+  "description": "哔哩哔哩推送的本地维护工具，不参与扩展运行。",
   "engines": {
     "node": ">=24"
   },

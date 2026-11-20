@@ -1,8 +1,9 @@
 import {
-  KINDS, KIND_LABELS, LIVE_ORIGIN, LIVE_PERMISSION, normalizeSettings,
+  KINDS, KIND_LABELS, LIVE_ORIGIN, LIVE_PERMISSION, ISSUE_LIMITS, CheckError, normalizeSettings,
   videoFromItem, dynamicFromItem, dynamicFeedId, liveFromResponse, itemUrl, scanFeed, matches,
   numericId, followingFromItem
 } from './core.js';
+import { describeIssue, readIssueHistory, recordIssue, updateIssueHistory } from './diagnostics.js';
 
 const ALARM = 'check-videos';
 // 使用扩展根目录下的完整地址，避免通知图标随后台脚本目录解析。
@@ -10,7 +11,7 @@ const NOTIFICATION_ICON = chrome.runtime.getURL('assets/icon.png');
 const API = 'https://api.bilibili.com';
 const emptyState = () => ({
   account: '', seen: [], baseline: false, dynamicSeen: [], dynamicBaseline: false,
-  liveRooms: null, sources: {}, pending: [], history: [], failures: 0
+  liveRooms: null, sources: {}, globalIssues: {}, diagnosticScope: null, pending: [], history: [], failures: 0
 });
 const enabledKinds = settings => KINDS.filter(kind => settings.rules[kind].mode !== 'off');
 const feed = (type, offset = '') => api(`/x/polymer/web-dynamic/v1/feed/all?type=${type}&timezone_offset=-480`
@@ -27,29 +28,56 @@ async function read() {
   const stored = await chrome.storage.local.get(['settings', 'state']);
   return { settings: normalizeSettings(stored.settings), state: { ...emptyState(), ...stored.state } };
 }
+async function status() {
+  const current = await read();
+  return { ...current, diagnostics: await readIssueHistory(current.settings.issueLimit, current.state.diagnosticScope) };
+}
+function requestFailure(signal, error) {
+  return signal.aborted || error?.name === 'TimeoutError'
+    ? new CheckError('timeout', '请求超时。')
+    : new CheckError('network', '网络请求失败，请检查网络连接。');
+}
 async function api(path, origin = API) {
+  const signal = AbortSignal.timeout(20000);
   let response;
   try {
     // Cookie 由浏览器自动附带；不读取、复制或保存登录凭据。
     response = await fetch(origin + path, {
-      credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(20000)
+      credentials: 'include', cache: 'no-store', signal
     });
-  } catch {
-    throw new Error('请求失败或超时，请检查网络后重试。');
+  } catch (error) {
+    throw requestFailure(signal, error);
   }
-  if (!response.ok) throw new Error(`B站请求失败（HTTP ${response.status}），已降低重试频率。`);
+  if (!response.ok) {
+    const code = `HTTP ${response.status}`;
+    if (response.status === 429) throw new CheckError('rate-limit', `B 站限制了请求（${code}）。`, code);
+    if (response.status === 412) throw new CheckError('rejected', `B 站拒绝了请求（${code}）。`, code);
+    throw new CheckError('http', `B 站请求失败（${code}）。`, code);
+  }
   let body;
   try { body = await response.json(); }
-  catch { throw new Error('B站返回了非 JSON 内容，可能需要在网页完成验证。'); }
+  catch (error) {
+    if (signal.aborted || error?.name === 'TimeoutError' || error instanceof TypeError) {
+      throw requestFailure(signal, error);
+    }
+    throw new CheckError('response', 'B 站返回了无法读取的响应，可打开 B 站网页确认是否需要验证。');
+  }
+  if (!Number.isSafeInteger(body?.code)) throw new CheckError('response', 'B 站响应缺少有效的状态码。');
   if (body.code !== 0) {
-    if (body.code === -101) throw new Error('B站登录已失效，请在当前 Edge 配置文件中重新登录 B站。');
-    throw new Error(`B站接口返回 ${body.code}：${String(body.message ?? '请打开 B站网页检查登录或验证状态').slice(0, 160)}`);
+    const code = String(body.code);
+    if (body.code === -101) {
+      throw new CheckError('login', 'B 站登录已失效，请在当前 Edge 配置文件中重新登录 B 站。', code);
+    }
+    if (body.code === -412) throw new CheckError('rejected', `B 站拒绝了请求（${code}）。`, code);
+    throw new CheckError('api', `B 站接口返回错误（${code}）。`, code);
   }
   return body.data;
 }
 async function currentAccount() {
   const account = await api('/x/web-interface/nav');
-  if (!account?.isLogin || !account.mid) throw new Error('请先在当前 Edge 配置文件中登录 B站。');
+  if (!account?.isLogin || !account.mid) {
+    throw new CheckError('login', '请先在当前 Edge 配置文件中登录 B 站。');
+  }
   return account;
 }
 async function followingPage(page, expectedAccount) {
@@ -106,11 +134,12 @@ function notify(item, id, silent, prefix = '') {
 
 async function liveRooms() {
   if (!await chrome.permissions.contains(LIVE_PERMISSION)) {
-    throw new Error('请在设置中允许访问 B站直播接口。');
+    throw new CheckError('permission', '请在设置中允许访问 B站直播接口。');
   }
   return liveFromResponse(await api('/xlive/web-ucenter/v1/xfetter/GetWebList?hit_ab=true', LIVE_ORIGIN));
 }
 async function flush(state, settings, liveChecked) {
+  let sent = false;
   for (let index = 0; index < state.pending.length;) {
     const item = state.pending[index];
     const kind = item.kind ?? 'video';
@@ -122,11 +151,17 @@ async function flush(state, settings, liveChecked) {
         continue;
       }
       const session = kind === 'live' ? `:${item.session}` : '';
-      await notify(item, `${kind}:${item.id}${session}`, settings.silent);
+      try {
+        await notify(item, `${kind}:${item.id}${session}`, settings.silent);
+      } catch {
+        throw new CheckError('notification', '无法发送 Windows 通知，请检查 Edge 和 Windows 的通知设置。');
+      }
+      sent = true;
     }
     state.pending.splice(index, 1);
     await chrome.storage.local.set({ state });
   }
+  return sent;
 }
 
 async function scanKind(kind, settings, state) {
@@ -168,18 +203,37 @@ function recordScan(kind, result, state, settings) {
   return { records, note };
 }
 
+function setGlobalIssue(state, events, source, issue) {
+  const previous = state.globalIssues[source];
+  const at = Date.now();
+  recordIssue(events, source, issue, previous, at);
+  if (issue) state.globalIssues[source] = { ...issue, at, failures: (previous?.failures ?? 0) + 1 };
+  else delete state.globalIssues[source];
+}
+
 async function check(manual = false) {
   const { settings, state: saved } = await read();
   let state = saved;
   if (!settings.enabled && !manual) return;
   const kinds = enabledKinds(settings);
-  if (!kinds.length) return { settings, state };
+  if (!kinds.length) return;
   state.lastAttempt = Date.now();
+  const events = [];
+  let resetHistory = false;
+  let phase = 'account';
   try {
     const account = await currentAccount();
     const mid = String(account.mid);
-    if (state.account !== mid) state = { ...emptyState(), account: mid, lastAttempt: Date.now() };
+    if (state.account !== mid) {
+      resetHistory = Boolean(state.account);
+      const globalIssues = resetHistory ? {} : state.globalIssues;
+      // 用随机标记隔离会话历史，换号时即使会话存储写入失败，也不会显示上一账号的异常。
+      const diagnosticScope = resetHistory ? crypto.randomUUID() : state.diagnosticScope;
+      state = { ...emptyState(), account: mid, lastAttempt: state.lastAttempt, globalIssues, diagnosticScope };
+    }
     state.accountName = String(account.uname ?? mid);
+    setGlobalIssue(state, events, 'account', null);
+    phase = 'check';
     // 各来源并行读取、分别记录错误，直播或动态接口失败不阻塞投稿检查。
     const due = kinds.filter(kind => manual || !(state.sources[kind]?.retryAt > Date.now()));
     const scans = await Promise.allSettled(due.map(kind => scanKind(kind, settings, state)));
@@ -187,18 +241,23 @@ async function check(manual = false) {
     let liveChecked = false;
     for (const [index, kind] of due.entries()) {
       const scan = scans[index];
+      const previous = state.sources[kind];
+      const checkedAt = Date.now();
       if (scan.status === 'rejected') {
-        const failures = (state.sources[kind]?.failures ?? 0) + 1;
+        const failures = (previous?.failures ?? 0) + 1;
         const delay = Math.min(60, settings.interval * 2 ** Math.min(failures, 6));
-        state.sources[kind] = { failures, retryAt: Date.now() + delay * 60000,
-          error: scan.reason?.message ?? String(scan.reason) };
+        const issue = describeIssue(scan.reason, { category: 'check', message: '检查此项目时发生异常。', code: null });
+        state.sources[kind] = { failures, lastAttempt: checkedAt, lastSuccess: previous?.lastSuccess,
+          retryAt: checkedAt + delay * 60000, error: issue.message, issue };
+        recordIssue(events, kind, issue, previous?.issue, checkedAt);
         continue;
       }
       const result = recordScan(kind, scan.value, state, settings);
       if (kind === 'live') liveChecked = true;
       records.push(...result.records);
-      state.sources[kind] = { note: result.note };
-      state.lastSuccess = Date.now();
+      state.sources[kind] = { note: result.note, lastAttempt: checkedAt, lastSuccess: checkedAt };
+      state.lastSuccess = checkedAt;
+      recordIssue(events, kind, null, previous?.issue, checkedAt);
     }
     records.sort((a, b) => (b.published || b.detected / 1000) - (a.published || a.detected / 1000));
     state.history = [...records, ...state.history].slice(0, 100);
@@ -207,22 +266,27 @@ async function check(manual = false) {
     state.error = sourceErrors(state, kinds);
     // 先落盘待发送列表，避免后台休眠时丢失整批通知。
     await chrome.storage.local.set({ state });
-    await flush(state, settings, liveChecked);
-    if (state.error) await badge('!');
+    if (await flush(state, settings, liveChecked)) setGlobalIssue(state, events, 'notification', null);
+    else if (!state.pending.length) delete state.globalIssues.notification;
+    setGlobalIssue(state, events, 'check', null);
+    if (state.error || Object.keys(state.globalIssues).length) await badge('!');
     else await badge(settings.enabled ? '' : '停', '#64748b');
   } catch (error) {
+    const source = error instanceof CheckError && error.category === 'notification' ? 'notification' : phase;
+    const issue = describeIssue(error, { category: 'check', message: '扩展运行异常，请重新打开设置页后重试。', code: null });
+    setGlobalIssue(state, events, source, issue);
     state.failures = (state.failures || 0) + 1;
-    state.error = error.message || String(error);
+    state.error = issue.message;
     await badge('!');
   }
   await schedule(settings, state);
   await chrome.storage.local.set({ state });
-  return { settings, state };
+  if (events.length || resetHistory) await updateIssueHistory(settings.issueLimit, state.diagnosticScope, events);
 }
 
 async function saveSettings(input) {
-  const { state } = await read();
-  const settings = normalizeSettings(input);
+  const { settings: current, state } = await read();
+  const settings = normalizeSettings({ ...input, issueLimit: current.issueLimit });
   for (const kind of KINDS) {
     if (settings.rules[kind].mode !== 'off') continue;
     delete state.sources[kind];
@@ -231,12 +295,21 @@ async function saveSettings(input) {
     if (kind === 'live') state.liveRooms = null;
   }
   state.pending = state.pending.filter(item => matches(item, settings));
+  if (!state.pending.length) delete state.globalIssues.notification;
   const kinds = enabledKinds(settings);
   if (!state.failures) state.error = sourceErrors(state, kinds);
   await schedule(settings, state);
   await chrome.storage.local.set({ settings, state });
-  await badge(settings.enabled && kinds.length ? (state.error ? '!' : '') : '停', '#64748b');
-  return { settings, state };
+  const warning = state.error || Object.keys(state.globalIssues).length;
+  await badge(settings.enabled && kinds.length ? (warning ? '!' : '') : '停', '#64748b');
+}
+
+async function saveIssueLimit(limit) {
+  if (!ISSUE_LIMITS.includes(limit)) throw new Error('请选择有效的异常记录保留上限。');
+  const { settings, state } = await read();
+  await chrome.storage.local.set({ settings: { ...settings, issueLimit: limit } });
+  await updateIssueHistory(limit, state.diagnosticScope);
+  return status();
 }
 
 async function latestTestPost(kind) {
@@ -319,9 +392,10 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   else if (message.type === 'whispers') operation = whisperFollowings(message.account);
   else operation = serial(async () => {
     switch (message.type) {
-      case 'status': return read();
-      case 'check': return check(true);
-      case 'save': return saveSettings(message.settings);
+      case 'status': return status();
+      case 'check': await check(true); return status();
+      case 'save': await saveSettings(message.settings); return status();
+      case 'issue-limit': return saveIssueLimit(message.limit);
       case 'test': return testNotification(message.kind, message.demo === true);
       default: throw new Error('未知操作');
     }
