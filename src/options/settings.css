@@ -50,6 +50,7 @@
 .picker-person { display: grid; grid-template-columns: 36px minmax(0, 1fr) 20px; align-items: center; gap: 10px; min-height: 52px; margin: 0 0 2px; padding: 7px 10px; border-radius: 8px; border-bottom: 1px solid #edf1f6; font-weight: 400; overflow-wrap: anywhere; cursor: pointer; }
 .picker-person:hover { background: #f3f6fa; }
 .picker-person:has(input:checked) { background: #fff4f8; font-weight: 600; }
+.picker-whisper { margin-left: 8px; color: #64748b; font-size: 12px; font-weight: 400; white-space: nowrap; }
 .picker-person input { width: 18px; height: 18px; margin: 0; accent-color: #dc4877; cursor: pointer; }
 .picker-avatar { position: relative; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; overflow: hidden; background: #e5eef9; color: #406287; font-weight: 600; }
 .picker-avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }

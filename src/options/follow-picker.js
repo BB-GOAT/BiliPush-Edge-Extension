@@ -1,6 +1,6 @@
 import { KINDS, KIND_LABELS } from '../core.js';
 
-export function createFollowPicker({ loadPage, confirm }) {
+export function createFollowPicker({ loadPage, loadWhisperList, confirm }) {
   const dialog = document.getElementById('follow-picker');
   const field = id => dialog.querySelector(`#picker-${id}`);
   const list = field('list');
@@ -23,30 +23,36 @@ export function createFollowPicker({ loadPage, confirm }) {
   }
 
   function renderProgress() {
-    const { loading, error, people, total, accountChanged } = session;
+    const { loading, error, people, total, accountChanged, whispers, whisperLoading, whisperError } = session;
     const count = `已加载 ${people.size}${total === null ? '' : ` / ${total}`} 位关注的 UP 主`;
-    field('status').textContent = error ? `${error}${people.size ? ` ${count}。` : ''}`
+    const regular = error ? `${error}${people.size ? ` ${count}。` : ''}`
       : loading ? `${count}，正在读取…` : `${count}。`;
+    let legacy = '';
+    if (session.account && !accountChanged) {
+      legacy = whisperLoading ? '正在读取旧悄悄关注…' : whisperError ? `旧悄悄关注读取失败：${whisperError}`
+        : `旧悄悄关注 ${whispers.size} 位。`;
+    }
+    field('status').textContent = legacy ? `${regular} ${legacy}` : regular;
     retry.hidden = loading || !error || accountChanged;
     field('confirm').disabled = accountChanged;
   }
 
   function renderList(resetScroll = false) {
-    const { people, draft, kind, loading, error, accountChanged } = session;
+    const { people, whispers, draft, kind, loading, whisperLoading, error, accountChanged } = session;
     const selected = draft[kind];
     const filter = search.value.trim().toLowerCase();
-    const candidates = accountChanged ? [] : [...people.values()];
+    const candidates = accountChanged ? new Map() : new Map([...people, ...whispers]);
     if (!accountChanged) {
       // 分页尚未结束或旧 UID 已不在返回结果中时，保留用户原先的选择。
       for (const uid of selected) {
-        if (!people.has(uid)) candidates.push({ uid, name: `暂未匹配 · UID ${uid}`, avatar: '' });
+        if (!candidates.has(uid)) candidates.set(uid, { uid, name: `暂未匹配 · UID ${uid}`, avatar: '' });
       }
     }
     const focusedUid = list.contains(document.activeElement) ? document.activeElement.dataset.uid : '';
     const scroll = resetScroll ? 0 : list.scrollTop;
     const fragment = document.createDocumentFragment();
     let focusTarget;
-    for (const person of candidates) {
+    for (const person of candidates.values()) {
       const checked = selected.has(person.uid);
       if ((onlySelected.checked && !checked) || !person.name.toLowerCase().includes(filter)) continue;
       const row = document.createElement('label');
@@ -66,6 +72,12 @@ export function createFollowPicker({ loadPage, confirm }) {
       }
       const name = document.createElement('span');
       name.textContent = person.name;
+      if (whispers.has(person.uid)) {
+        const tag = document.createElement('span');
+        tag.className = 'picker-whisper';
+        tag.textContent = '悄悄关注';
+        name.append(tag);
+      }
       const input = document.createElement('input');
       input.type = 'checkbox';
       input.dataset.uid = person.uid;
@@ -75,17 +87,43 @@ export function createFollowPicker({ loadPage, confirm }) {
       fragment.append(row);
     }
     const hasRows = fragment.childElementCount > 0;
-    for (const button of bulkButtons) button.disabled = loading || !hasRows;
+    for (const button of bulkButtons) button.disabled = loading || whisperLoading || !hasRows;
     if (!hasRows) {
       const empty = document.createElement('p');
       empty.className = 'hint picker-empty';
-      empty.textContent = loading ? '关注列表正在加载…' : error ? '当前没有可显示的匹配项。'
+      empty.textContent = loading || whisperLoading ? '关注列表正在加载…' : error ? '当前没有可显示的匹配项。'
         : filter ? '没有匹配的 UP 主。' : onlySelected.checked ? '这类提醒还未勾选 UP 主。' : '关注列表为空。';
       fragment.append(empty);
     }
     list.replaceChildren(fragment);
     list.scrollTop = scroll;
     focusTarget?.focus({ preventScroll: true });
+  }
+
+  function discardChangedAccount(current) {
+    current.accountChanged = true;
+    current.people.clear();
+    current.whispers.clear();
+    current.total = null;
+    current.error = 'B 站登录账号已切换，请关闭后重新打开选择面板。';
+  }
+
+  async function loadWhispers(current) {
+    current.whisperLoading = true;
+    try {
+      const result = await loadWhisperList(current.account);
+      if (session !== current || current.accountChanged) return;
+      if (result.accountChanged) discardChangedAccount(current);
+      else for (const person of result.people) current.whispers.set(person.uid, person);
+    } catch (error) {
+      current.whisperError = error.message;
+    } finally {
+      if (session === current) {
+        current.whisperLoading = false;
+        renderProgress();
+        renderList();
+      }
+    }
   }
 
   async function load() {
@@ -95,16 +133,16 @@ export function createFollowPicker({ loadPage, confirm }) {
     renderProgress();
     renderList();
     try {
-      while (session === current) {
+      while (session === current && !current.accountChanged) {
         const page = await loadPage(current.page, current.account);
-        if (session !== current) return;
+        if (session !== current || current.accountChanged) return;
         if (page.accountChanged) {
-          current.accountChanged = true;
-          current.people.clear();
-          current.total = null;
-          throw new Error('B 站登录账号已切换，请关闭后重新打开选择面板。');
+          discardChangedAccount(current);
+          break;
         }
+        const firstPage = !current.account;
         current.account = page.account;
+        if (firstPage) void loadWhispers(current);
         current.total = page.total;
         const previous = current.people.size;
         for (const person of page.people) current.people.set(person.uid, person);
@@ -119,7 +157,7 @@ export function createFollowPicker({ loadPage, confirm }) {
         await new Promise(resolve => setTimeout(resolve, 250));
       }
     } catch (error) {
-      current.error = error.message;
+      if (!current.accountChanged) current.error = error.message;
     } finally {
       if (session === current) {
         current.loading = false;
@@ -167,7 +205,7 @@ export function createFollowPicker({ loadPage, confirm }) {
     if (input.checked) selected.add(uid);
     else selected.delete(uid);
     renderSummary();
-    if (!input.checked && (onlySelected.checked || !session.people.has(uid))) {
+    if (!input.checked && (onlySelected.checked || (!session.people.has(uid) && !session.whispers.has(uid)))) {
       const row = input.closest('label');
       const next = row.nextElementSibling ?? row.previousElementSibling;
       const nextUid = next?.querySelector('input')?.dataset.uid;
@@ -181,6 +219,7 @@ export function createFollowPicker({ loadPage, confirm }) {
   });
   function close() {
     session.people.clear();
+    session.whispers.clear();
     session = undefined;
     dialog.close();
     list.replaceChildren();
@@ -200,7 +239,7 @@ export function createFollowPicker({ loadPage, confirm }) {
   return { open(kind, rules) {
     if (dialog.open) return;
     session = {
-      kind, people: new Map(), page: 1, total: null,
+      kind, people: new Map(), whispers: new Map(), page: 1, total: null,
       draft: Object.fromEntries(KINDS.map(key => [key, new Set(rules[key].uids)])),
       modes: Object.fromEntries(KINDS.map(key => [key, rules[key].mode]))
     };

@@ -67,6 +67,19 @@ async function followingPage(page, expectedAccount) {
   return { account, total: data.total, people: data.list.map(followingFromItem).filter(Boolean),
     hasMore: page * pageSize < data.total };
 }
+async function whisperFollowings(expectedAccount) {
+  if (!expectedAccount || numericId(expectedAccount) !== expectedAccount) {
+    throw new Error('无法确认当前账号，请重新打开选择面板。');
+  }
+  if (numericId((await currentAccount()).mid) !== expectedAccount) return { accountChanged: true };
+  const data = await api('/x/relation/whispers');
+  const list = data?.list === null ? [] : data?.list;
+  if (!Array.isArray(list)) throw new Error('B站未返回有效的悄悄关注列表。');
+  const people = list.map(followingFromItem).filter(Boolean);
+  // 旧接口按登录状态返回名单，交付前再确认期间没有切换账号。
+  if (people.length && numericId((await currentAccount()).mid) !== expectedAccount) return { accountChanged: true };
+  return { people };
+}
 async function badge(text, color = '#d55435') {
   await chrome.action.setBadgeText({ text });
   await chrome.action.setBadgeBackgroundColor({ color });
@@ -300,8 +313,11 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     respond({ error: '消息来源不是本扩展的设置页，请关闭此页后重新点击扩展图标打开。' });
     return;
   }
-  // 关注面板逐页读取，与检查和保存共用接口凭据，无需排队等待状态写入。
-  const operation = message.type === 'followings' ? followingPage(message.page, message.account) : serial(async () => {
+  // 关注面板只读取数据，无需排队等待状态写入。
+  let operation;
+  if (message.type === 'followings') operation = followingPage(message.page, message.account);
+  else if (message.type === 'whispers') operation = whisperFollowings(message.account);
+  else operation = serial(async () => {
     switch (message.type) {
       case 'status': return read();
       case 'check': return check(true);

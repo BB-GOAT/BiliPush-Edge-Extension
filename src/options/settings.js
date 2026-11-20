@@ -8,6 +8,7 @@ const time = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: 
 const ruleFields = {};
 const picker = createFollowPicker({
   loadPage: (page, account) => send('followings', { page, account }),
+  loadWhisperList: account => send('whispers', { account }),
   confirm(draft) {
     for (const kind of KINDS) {
       ruleFields[kind].uids = [...draft[kind]];

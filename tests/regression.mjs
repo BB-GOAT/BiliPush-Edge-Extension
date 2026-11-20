@@ -86,6 +86,9 @@ let liveFailure = false;
 let liveCalls = 0;
 const followingCalls = [];
 const followingPages = new Map();
+let whisperResponse = { code: 0, data: { list: [{ mid: '70', uname: '旧悄悄关注样例', attribute: 1 }] } };
+let switchAccountOnWhispers = false;
+let whisperCalls = 0;
 const dynamicPages = new Map();
 const event = () => ({ addListener(listener) { this.listener = listener; } });
 
@@ -145,7 +148,7 @@ globalThis.chrome = {
     async openOptionsPage() { opened.push('options'); }
   }
 };
-globalThis.fetch = async url => {
+globalThis.fetch = async (url, options) => {
   const parsed = new URL(url);
   if (parsed.hostname === 'api.live.bilibili.com') liveCalls++;
   return {
@@ -159,6 +162,13 @@ globalThis.fetch = async url => {
         const query = Object.fromEntries(parsed.searchParams);
         followingCalls.push(query);
         return { code: 0, data: followingPages.get(query.pn) };
+      }
+      if (parsed.pathname === '/x/relation/whispers') {
+        assert.equal(options.credentials, 'include');
+        assert.equal(parsed.search, '');
+        whisperCalls++;
+        if (switchAccountOnWhispers) mid = '300';
+        return whisperResponse;
       }
       if (parsed.searchParams.get('type') === 'all') {
         const page = dynamicPages.get(parsed.searchParams.get('offset') ?? '');
@@ -240,6 +250,29 @@ equal(await message('followings', { page: 1 }), { account: '200', total: 0, hasM
 followingPages.set('1', { total: 51, list: null });
 await assert.rejects(message('followings', { page: 1 }), /有效的关注列表/);
 checks++;
+equal(store, beforeFollowing);
+
+// 普通分页之外读取旧悄悄关注。错误或换号时不影响既有设置与普通关注。
+equal(await message('whispers', { account: '200' }), {
+  people: [{ uid: '70', name: '旧悄悄关注样例', avatar: '' }]
+});
+equal(await message('whispers', { account: '300' }), { accountChanged: true });
+equal(whisperCalls, 1);
+switchAccountOnWhispers = true;
+equal(await message('whispers', { account: '200' }), { accountChanged: true });
+equal(whisperCalls, 2);
+mid = '200';
+switchAccountOnWhispers = false;
+whisperResponse = { code: 0, data: { list: null } };
+equal(await message('whispers', { account: '200' }), { people: [] });
+whisperResponse = { code: 0, data: {} };
+await assert.rejects(message('whispers', { account: '200' }), /有效的悄悄关注列表/);
+checks++;
+whisperResponse = { code: -404, message: '不存在' };
+await assert.rejects(message('whispers', { account: '200' }), /-404/);
+checks++;
+followingPages.set('1', { total: 1, list: [{ mid: '10', uname: '普通关注样例' }] });
+equal((await message('followings', { page: 1 })).people.map(person => person.uid), ['10']);
 equal(store, beforeFollowing);
 
 // 连续失败退避，成功后恢复正常间隔。
