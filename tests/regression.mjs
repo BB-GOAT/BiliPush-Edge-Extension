@@ -77,6 +77,7 @@ checks++;
 // 后台集成模拟：存储、定时任务、通知、消息与 B站响应均留在本进程。
 const store = { settings: { mode: 'all', uids: ['77'], quickCheck: false } };
 const sessionStore = {};
+const issueEntries = (entries = sessionStore.recentIssues.entries) => entries.filter(entry => Object.hasOwn(entry, 'issue'));
 const alarms = new Map();
 const sent = [];
 const activeNotifications = new Map();
@@ -343,11 +344,11 @@ apiFailure = true;
 await message('check');
 equal(store.state.failures, 1);
 equal(store.state.globalIssues.account.category, 'login');
-equal(sessionStore.recentIssues.entries.at(-1).issue.code, '-101');
+equal(issueEntries().at(-1).issue.code, '-101');
 equal(Math.round((store.state.nextCheck - Date.now()) / 60000), 14);
 await message('check');
 equal(store.state.failures, 2);
-equal(sessionStore.recentIssues.entries.at(-1).count, 2);
+equal(issueEntries().at(-1).count, 2);
 equal(Math.round((store.state.nextCheck - Date.now()) / 60000), 28);
 // Edge 在退避期间重新启动时，保留原检查时间，闹钟丢失时按原时间补建。
 const beforeRestart = { state: structuredClone(store.state), accountCalls };
@@ -368,8 +369,8 @@ apiFailure = false;
 await message('check');
 equal(store.state.failures, 0);
 equal(store.state.error, '');
-equal(sessionStore.recentIssues.entries.at(-1).source, 'account');
-equal(sessionStore.recentIssues.entries.at(-1).issue, null);
+equal(issueEntries().at(-1).source, 'account');
+equal(issueEntries().at(-1).issue, null);
 
 // 暂停取消定时任务，但仍允许手动检查。
 await message('save', { settings: { enabled: false } });
@@ -385,12 +386,15 @@ notificationFail = true;
 feed = [item(6), ...feed];
 await message('check');
 equal(store.state.pending.length, 1);
-equal(sessionStore.recentIssues.entries.at(-1).issue.category, 'notification');
+equal(issueEntries().at(-1).issue.category, 'notification');
+equal(issueEntries().at(-1).level, 'error');
 notificationFail = false;
 await message('check');
 equal(store.state.pending.length, 0);
-equal(sessionStore.recentIssues.entries.at(-1).source, 'notification');
-equal(sessionStore.recentIssues.entries.at(-1).issue, null);
+equal(sessionStore.recentIssues.entries.some(entry => entry.source === 'notification' &&
+  entry.level === 'info' && entry.message === '视频投稿：Edge 已接受 1 条通知。'), true);
+equal(issueEntries().at(-1).source, 'notification');
+equal(issueEntries().at(-1).issue, null);
 equal(sent.at(-1).id, 'video:BV0000000006');
 await message('check');
 equal(sent.filter(notification => notification.id === 'video:BV0000000006').length, 1);
@@ -398,7 +402,7 @@ equal(sent.filter(notification => notification.id === 'video:BV0000000006').leng
 // 连续点击均创建新通知，清理旧测试提醒但保留真实视频通知。
 activeNotifications.set('test', { message: '旧版测试通知' });
 const beforeTest = structuredClone(store);
-const beforeTestIssues = structuredClone(sessionStore);
+const beforeTestIssues = structuredClone(issueEntries());
 feed = [item(6), item(7), ...feed.slice(1)];
 equal(await message('test'), { title: '视频 7' });
 const firstTest = sent.at(-1).id;
@@ -417,7 +421,10 @@ equal(opened.at(-1).url, 'https://www.bilibili.com/video/BV0000000007/');
 await chrome.notifications.onClicked.listener('video:BV0000000006');
 equal(opened.at(-1).url, 'https://www.bilibili.com/video/BV0000000006/');
 equal(store, beforeTest);
-equal(sessionStore, beforeTestIssues);
+equal(issueEntries(), beforeTestIssues);
+equal(sessionStore.recentIssues.entries.slice(-2).map(({ source, level, message }) => [source, level, message]), [
+  ['test', 'info', '视频投稿测试：Edge 已接受通知。'], ['test', 'info', '视频投稿测试：Edge 已接受通知。']
+]);
 equal(liveCalls, 0);
 
 // 测试动态跳过纯视频首页，测试直播跳过未开播房间，两者都不消耗正式检查记录。
@@ -466,7 +473,8 @@ equal(sent.at(-1).title, '【测试·演示样例】示例 UP 主 开播了');
 await chrome.notifications.onClicked.listener(previewDemo);
 equal(opened.at(-1), 'options');
 equal(store, beforeTest);
-equal(sessionStore, beforeTestIssues);
+equal(issueEntries().slice(0, -2), beforeTestIssues);
+equal(issueEntries().slice(-2).map(({ source, level }) => [source, level]), [['test', 'warning'], ['test', 'warning']]);
 
 // 新增类别各自建立基线，不能改写已保存的投稿进度。
 const rules = {
@@ -484,6 +492,8 @@ equal(sent.length, sentBeforeNewKinds);
 equal(store.state.seen.includes('BV0000000006'), true);
 equal(store.state.dynamicSeen.includes('2001'), true);
 equal(store.state.liveRooms, ['3001']);
+equal(sessionStore.recentIssues.entries.some(entry => entry.source === 'live' &&
+  entry.level === 'info' && entry.message.includes('已建立基线')), true);
 
 // 各类别只按自己的 UID 过滤，视频和直播推荐不会再触发动态提醒。
 feed = [item(8, '20'), item(9), ...feed];
@@ -494,6 +504,9 @@ await message('check');
 equal(sent.slice(sentBeforeNewKinds).map(entry => entry.id.replace(/^(live:\d+):.+$/, '$1')),
   ['video:BV0000000009', 'dynamic:2002', 'dynamic:2005', 'live:3002']);
 const firstLive = sent.at(-1).id;
+equal(sessionStore.recentIssues.entries.findLast(entry => entry.source === 'dynamic').message,
+  '读取 1 页，发现 3 条新内容，范围筛掉 1 条，2 条加入待发队列。');
+equal(JSON.stringify(sessionStore).includes('动态作者'), false);
 await chrome.notifications.onClicked.listener('dynamic:2002');
 equal(opened.at(-1).url, 'https://t.bilibili.com/2002');
 await chrome.notifications.onClicked.listener(firstLive);
@@ -550,22 +563,24 @@ equal(store.state.sources.live.lastSuccess, lastLiveSuccess);
 equal(store.state.sources.live.issue.category, 'rejected');
 equal(store.state.sources.live.issue.code, '-412');
 equal(JSON.stringify(sessionStore).includes('模拟服务端原始响应'), false);
-const beforeRetryIssues = structuredClone(sessionStore);
+const beforeRetryIssue = structuredClone(issueEntries().findLast(entry => entry.source === 'live'));
 liveFailure = false;
 const beforeRetry = liveCalls;
 await fireAlarm();
 equal(liveCalls, beforeRetry);
-equal(sessionStore, beforeRetryIssues);
+equal(issueEntries().findLast(entry => entry.source === 'live'), beforeRetryIssue);
+equal(sessionStore.recentIssues.entries.some(entry => entry.source === 'live' &&
+  entry.level === 'warning' && entry.message === '仍在等待重试，本轮跳过。'), true);
 missingLivePermission = true;
 await message('check');
 equal(liveCalls, beforeRetry);
 equal(store.state.error.includes('允许访问 B站直播接口'), true);
-equal(sessionStore.recentIssues.entries.at(-1).issue.category, 'permission');
+equal(issueEntries().at(-1).issue.category, 'permission');
 missingLivePermission = false;
 await message('check');
 equal(store.state.error, '');
-equal(sessionStore.recentIssues.entries.at(-1).source, 'live');
-equal(sessionStore.recentIssues.entries.at(-1).issue, null);
+equal(issueEntries().at(-1).source, 'live');
+equal(issueEntries().at(-1).issue, null);
 
 // 关闭再开启只重新建立对应类别的基线。
 await message('save', { settings: { rules: { ...rules, live: { mode: 'off' } } } });
@@ -606,24 +621,26 @@ equal(store.state.sources.live.retryAt - store.state.sources.live.lastAttempt, 6
 equal(store.state.nextCheck < store.state.sources.live.retryAt, true);
 dynamicError = new DOMException('模拟超时详情', 'TimeoutError');
 await message('check');
-let entries = (await message('status')).diagnostics.entries;
+let entries = issueEntries((await message('status')).diagnostics.entries);
 equal(entries[0].source, 'live');
 equal(entries[0].count, 2);
 equal(entries[1].issue.category, 'timeout');
 equal(entries[1].issue.message, '请求超时。');
 dynamicError = new TypeError('模拟网络详情');
 await message('check');
-entries = (await message('status')).diagnostics.entries;
+entries = issueEntries((await message('status')).diagnostics.entries);
 equal(entries[0].count, 3);
 equal(entries[1].issue.category, 'network');
 equal(entries[1].count, 1);
 equal(JSON.stringify(sessionStore).includes('模拟'), false);
 equal(Object.hasOwn(store, 'recentIssues'), false);
-equal(Object.keys(entries[0]), ['source', 'issue', 'firstAt', 'lastAt', 'count']);
+equal(entries[0].level, 'warning');
+equal(entries[0].retryAt, store.state.sources.live.retryAt);
+equal(Object.keys(entries[0]), ['source', 'level', 'issue', 'retryAt', 'firstAt', 'lastAt', 'count']);
 dynamicError = undefined;
 liveHttpStatus = 0;
 await message('check');
-equal((await message('status')).diagnostics.entries.slice(0, 2).map(entry => [entry.source, entry.issue]),
+equal(issueEntries((await message('status')).diagnostics.entries).slice(0, 2).map(entry => [entry.source, entry.issue]),
   [['live', null], ['dynamic', null]]);
 liveHttpStatus = 429;
 await message('check');
@@ -644,7 +661,7 @@ equal(store.state.nextCheck, alarmBeforeLimit);
 equal(sessionStore.recentIssues.entries.length, 20);
 await message('issue-limit', { limit: 100 });
 equal(sessionStore.recentIssues.entries.length, 20);
-await assert.rejects(message('issue-limit', { limit: 500 }), /有效的异常记录保留上限/);
+await assert.rejects(message('issue-limit', { limit: 500 }), /有效的日志保留上限/);
 checks++;
 await message('save', { settings: { interval: 3, rules } });
 equal(store.settings.issueLimit, 100);
@@ -664,7 +681,7 @@ equal(sent.at(-1).id, 'video:BV0000000012');
 equal(unavailable.state.nextCheck < unavailable.state.sources.live.retryAt, true);
 unavailableSession = false;
 await message('check');
-equal((await message('status')).diagnostics.entries.length, 1);
+equal(issueEntries((await message('status')).diagnostics.entries).length, 1);
 mid = '300';
 liveHttpStatus = 0;
 const previousScope = sessionStore.recentIssues.scope;
@@ -678,7 +695,7 @@ unavailableSession = false;
 liveHttpStatus = 429;
 await message('check');
 equal(sessionStore.recentIssues.scope, newAccount.state.diagnosticScope);
-equal(sessionStore.recentIssues.entries.length, 1);
+equal(issueEntries().length, 1);
 liveHttpStatus = 0;
 
 // 关停期间错过的计划可在启动后补查，排队中的旧闹钟不会重复查询。
@@ -728,7 +745,15 @@ const initialQuickAttempt = quickState.lastAttempt;
 const quietFeedCalls = feedCalls.length;
 const quietAccountCalls = accountCalls;
 const quietLiveCalls = liveCalls;
-quickState = (await tick(quickAlarm)).state;
+const firstQuiet = await tick(quickAlarm);
+const secondQuiet = await tick(quickAlarm);
+quickState = secondQuiet.state;
+const quietLog = secondQuiet.diagnostics.entries[0];
+equal(quietLog.level, 'info');
+equal(quietLog.message, 'B 站返回 0 条更新，本轮未读取内容列表。');
+equal(quietLog.count, 2);
+equal(quietLog.firstAt, firstQuiet.diagnostics.entries[0].lastAt);
+equal(quietLog.lastAt, clock);
 equal(probeCalls.at(-1), { type: 'all', update_baseline: '900000000000000123' });
 equal(feedCalls.length, quietFeedCalls);
 equal(accountCalls, quietAccountCalls);
@@ -749,7 +774,12 @@ updateNum = 2;
 updateBaseline = '900000000000000456';
 feed = [item(70), ...feed];
 dynamics = [dynamic(5001), ...dynamics];
-quickState = (await tick(quickAlarm)).state;
+const afterUpdate = await tick(quickAlarm);
+quickState = afterUpdate.state;
+equal(afterUpdate.diagnostics.entries.some(entry => entry.source === 'quick' &&
+  entry.message === 'B 站报告 2 条更新，开始读取内容列表。'), true);
+equal(afterUpdate.diagnostics.entries.some(entry => entry.source === 'dynamic' &&
+  entry.message.includes('1 条加入待发队列')), true);
 equal(quickState.lastTrigger, 'quick');
 equal(quickState.quick.cursor, updateBaseline);
 equal(feedCalls.slice(quietFeedCalls), ['all', 'video']);
@@ -778,6 +808,8 @@ quickState = result.state;
 equal(quickState.quick.next - clock, 60000);
 equal(quickState.globalIssues.quick.code, 'HTTP 429');
 equal(result.diagnostics.entries[0].source, 'quick');
+equal(result.diagnostics.entries[0].level, 'warning');
+equal(result.diagnostics.entries[0].retryAt, quickState.quick.next);
 equal(feedCalls.length, beforeLiveOnly);
 
 const fallbackAt = quickState.plan.content;
@@ -795,7 +827,8 @@ updateNum = 0;
 result = await tick(quickAlarm);
 equal(result.state.globalIssues.quick, undefined);
 equal(result.diagnostics.entries[0].source, 'quick');
-equal(result.diagnostics.entries[0].issue, null);
+equal(result.diagnostics.entries[0].level, 'info');
+equal(issueEntries(result.diagnostics.entries)[0].issue, null);
 
 // 快查事件在补查时间之后才投递时，仅运行一次补查，随后忽略旧定时事件。
 const staleFull = alarms.get('check-videos');
@@ -817,6 +850,8 @@ updateNum = 1;
 updateBaseline = '900000000000000459';
 result = await tick(quickAlarm);
 equal(result.state.account, '999');
+equal(result.diagnostics.entries.some(entry => entry.message?.includes('确认切换了 B 站账号')), true);
+equal(result.diagnostics.entries.some(entry => entry.source === 'quick' && entry.message?.includes('B 站报告')), false);
 equal(result.state.quick.cursor, updateBaseline);
 equal(result.state.history.every(entry => entry.detected === clock), true);
 equal(sent.length, beforeQuickAccount);
@@ -838,6 +873,16 @@ await message('save', { settings: { quickCheck: false, enabled: true, interval: 
 equal(alarms.has(quickAlarm), false);
 equal(store.state.plan.content - clock, 3 * 60000);
 Date.now = realNow;
+
+// 兼容旧格式的会话异常历史，日志正文不包含旧账号内容。
+const legacyIssue = { category: 'rate-limit', message: 'B 站限制了请求。', code: 'HTTP 429' };
+sessionStore.recentIssues = { scope: store.state.diagnosticScope, entries: [
+  { source: 'quick', issue: legacyIssue, firstAt: clock, lastAt: clock, count: 2 }
+] };
+const migratedLog = (await message('status')).diagnostics.entries[0];
+equal(migratedLog.level, 'warning');
+equal(migratedLog.issue, legacyIssue);
+equal(migratedLog.count, 2);
 
 // 设置页无 tab、携带查询/锚点时同样合法；相似地址与其他来源不能操作后台。
 equal((await request({ type: 'status' }, {

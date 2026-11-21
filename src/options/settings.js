@@ -1,9 +1,12 @@
 import { KINDS, KIND_LABELS, LIVE_PERMISSION, itemUrl } from '../core.js';
+import { LOG_KEY } from '../diagnostics.js';
 import { createFollowPicker } from './follow-picker.js';
 
 const $ = id => document.getElementById(id);
 let busy = false;
 let loaded = false;
+let logEntries = [];
+let refreshPending = false;
 const time = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
 const compactTime = value => {
   if (!value) return '—';
@@ -12,7 +15,9 @@ const compactTime = value => {
     ? date.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
     : time(value);
 };
-const CHECK_LABELS = { ...KIND_LABELS, account: '登录检查', notification: '通知发送', check: '扩展运行', quick: '快速检查' };
+const CHECK_LABELS = { ...KIND_LABELS, account: '登录检查', notification: '通知发送',
+  check: '扩展运行', quick: '快速检查', test: '测试通知' };
+const LOG_LEVELS = { info: '信息', warning: '警告', error: '错误' };
 const TRIGGER_LABELS = { alarm: '定时检查', manual: '手动检查', startup: 'Edge 启动',
   installed: '安装或更新后检查', quick: '快速检查发现更新' };
 const issueText = ({ message, code }) => code && !message.includes(code)
@@ -136,26 +141,48 @@ function renderStatus(settings, state) {
 }
 
 function renderDiagnostics(settings, { entries, available }) {
-  $('issue-limit').value = settings.issueLimit;
-  $('issue-count').textContent = available ? `${entries.length} 条记录` : '记录暂不可用';
-  $('issue-empty').hidden = entries.length > 0 || !available;
-  $('issues').hidden = entries.length === 0;
-  const feedback = $('issue-feedback');
-  feedback.textContent = available ? '' : '当前无法保存或读取会话内记录，仍可在运行状态中查看最新错误。';
+  logEntries = entries;
+  $('log-limit').value = settings.issueLimit;
+  $('log-count').textContent = available ? `${entries.length} 条记录` : '日志暂不可用';
+  const feedback = $('log-feedback');
+  feedback.textContent = available ? '' : '当前无法保存或读取会话日志，仍可在运行状态中查看最新错误。';
   feedback.hidden = available;
-  const list = $('issue-list');
-  list.replaceChildren();
-  for (const { source, issue, firstAt, lastAt, count } of entries) {
-    const row = list.insertRow();
+  renderLogs();
+}
+
+function renderLogs() {
+  const filter = $('log-filter').value;
+  const entries = logEntries.filter(({ level }) => filter === 'all' || filter === level ||
+    (filter === 'issues' && level !== 'info'));
+  const empty = $('log-empty');
+  empty.hidden = entries.length > 0 || $('log-feedback').textContent !== '';
+  empty.textContent = logEntries.length ? '当前等级暂无记录。' : '暂无运行日志。';
+  $('logs').hidden = entries.length === 0;
+  const list = $('log-list');
+  const rows = document.createDocumentFragment();
+  for (const { source, level, issue, message, retryAt, firstAt, lastAt, count } of entries) {
+    const row = document.createElement('tr');
     const when = row.insertCell();
-    when.textContent = count > 1 ? `${compactTime(firstAt)}～${compactTime(lastAt)}` : compactTime(lastAt);
-    when.title = count > 1 ? `${time(firstAt)}～${time(lastAt)}` : time(lastAt);
+    when.textContent = time(lastAt);
+    if (count > 1) {
+      when.title = `首次 ${time(firstAt)}，最近 ${time(lastAt)}`;
+    }
+    const severity = row.insertCell();
+    severity.textContent = LOG_LEVELS[level];
+    severity.className = `log-${level}`;
     row.insertCell().textContent = CHECK_LABELS[source];
-    const result = row.insertCell();
-    result.className = issue ? 'issue-failed' : 'issue-recovered';
-    result.textContent = issue ? issueText(issue) : '已恢复';
-    row.insertCell().textContent = issue ? `${count} 次` : '—';
+    const detail = row.insertCell();
+    detail.textContent = issue ? issueText(issue) : message;
+    if (count > 1) detail.append(`（共 ${count} 次）`);
+    if (retryAt) {
+      const retry = document.createElement('small');
+      retry.className = 'log-retry';
+      retry.textContent = `最早重试时间 ${time(retryAt)}`;
+      detail.append(retry);
+    }
+    rows.append(row);
   }
+  list.replaceChildren(rows);
 }
 
 function render({ settings, state, diagnostics }, fill = false) {
@@ -169,7 +196,7 @@ function render({ settings, state, diagnostics }, fill = false) {
       field.sync();
     }
     loaded = true;
-    $('issue-limit').disabled = false;
+    $('log-limit').disabled = false;
   }
   renderStatus(settings, state);
   renderDiagnostics(settings, diagnostics);
@@ -258,7 +285,8 @@ function test(kind, demo = false) {
 }
 for (const kind of KINDS) $(`test-${kind}`).addEventListener('click', () => test(kind));
 $('test-live-demo').addEventListener('click', () => test('live', true));
-$('issue-limit').addEventListener('change', async event => {
+$('log-filter').addEventListener('change', renderLogs);
+$('log-limit').addEventListener('change', async event => {
   const select = event.currentTarget;
   const limit = Number(select.value);
   select.disabled = true;
@@ -266,23 +294,29 @@ $('issue-limit').addEventListener('change', async event => {
   catch (error) {
     try { render(await send('status')); }
     catch {}
-    $('issue-feedback').textContent = error.message;
-    $('issue-feedback').hidden = false;
+    $('log-feedback').textContent = error.message;
+    $('log-feedback').hidden = false;
   } finally {
     select.disabled = false;
   }
 });
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && (changes.state || changes.settings) && loaded) {
-    void send('status').then(result => render(result)).catch(() => {});
+  const stateChanged = area === 'local' && (changes.state || changes.settings);
+  const logsChanged = area === 'session' && changes[LOG_KEY];
+  if (loaded && (stateChanged || logsChanged) && !refreshPending) {
+    refreshPending = true;
+    setTimeout(() => {
+      refreshPending = false;
+      void send('status').then(result => render(result)).catch(() => {});
+    }, 50);
   }
 });
 send('status').then(result => render(result, true)).catch(error => {
   $('badge').textContent = '连接失败';
   $('error').hidden = false;
   $('error').textContent = error.message;
-  $('issue-count').textContent = '记录暂不可用';
-  $('issue-empty').hidden = true;
-  $('issue-feedback').hidden = false;
-  $('issue-feedback').textContent = '后台未连接，无法读取会话内记录。';
+  $('log-count').textContent = '日志暂不可用';
+  $('log-empty').hidden = true;
+  $('log-feedback').hidden = false;
+  $('log-feedback').textContent = '后台未连接，无法读取会话日志。';
 });

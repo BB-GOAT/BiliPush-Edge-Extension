@@ -3,7 +3,7 @@ import {
   videoFromItem, dynamicFromItem, dynamicFeedId, liveFromResponse, itemUrl, scanFeed, matches,
   numericId, followingFromItem
 } from './core.js';
-import { describeIssue, readIssueHistory, recordIssue, updateIssueHistory } from './diagnostics.js';
+import { describeIssue, readLogHistory, recordIssue, recordLog, updateLogHistory } from './diagnostics.js';
 
 const ALARM = 'check-videos';
 const QUICK_ALARM = 'check-feed-updates';
@@ -15,6 +15,8 @@ const emptyState = () => ({
   account: '', seen: [], baseline: false, dynamicSeen: [], dynamicBaseline: false,
   liveRooms: null, sources: {}, globalIssues: {}, diagnosticScope: null, pending: [], history: [], failures: 0
 });
+const triggerLabels = { alarm: '定时检查', manual: '手动检查', startup: 'Edge 启动后补查',
+  installed: '安装或更新后检查', quick: '快速检查发现更新' };
 const enabledKinds = settings => KINDS.filter(kind => settings.rules[kind].mode !== 'off');
 const isPost = kind => kind !== 'live';
 const lane = kind => isPost(kind) ? 'content' : 'live';
@@ -36,7 +38,7 @@ async function read() {
 }
 async function status() {
   const current = await read();
-  return { ...current, diagnostics: await readIssueHistory(current.settings.issueLimit, current.state.diagnosticScope) };
+  return { ...current, diagnostics: await readLogHistory(current.settings.issueLimit, current.state.diagnosticScope) };
 }
 function requestFailure(signal, error) {
   return signal.aborted || error?.name === 'TimeoutError'
@@ -179,8 +181,19 @@ async function liveRooms() {
   }
   return liveFromResponse(await api('/xlive/web-ucenter/v1/xfetter/GetWebList?hit_ab=true', LIVE_ORIGIN));
 }
-async function flush(state, settings, liveChecked) {
-  let sent = false;
+async function flush(state, settings, liveChecked, events) {
+  const sent = {};
+  try {
+    await flushPending(state, settings, liveChecked, sent);
+  } finally {
+    for (const [kind, count] of Object.entries(sent)) {
+      recordLog(events, 'notification', `${KIND_LABELS[kind]}：Edge 已接受 ${count} 条通知。`);
+    }
+  }
+  return Object.keys(sent).length > 0;
+}
+
+async function flushPending(state, settings, liveChecked, sent) {
   for (let index = 0; index < state.pending.length;) {
     const item = state.pending[index];
     const kind = item.kind ?? 'video';
@@ -197,12 +210,11 @@ async function flush(state, settings, liveChecked) {
       } catch {
         throw new CheckError('notification', '无法发送 Windows 通知，请检查 Edge 和 Windows 的通知设置。');
       }
-      sent = true;
+      sent[kind] = (sent[kind] ?? 0) + 1;
     }
     state.pending.splice(index, 1);
     await chrome.storage.local.set({ state });
   }
-  return sent;
 }
 
 async function scanKind(kind, settings, state, firstPage) {
@@ -225,7 +237,7 @@ async function scanKind(kind, settings, state, firstPage) {
     video ? videoFromItem : dynamicFromItem, video ? undefined : dynamicFeedId);
   const known = new Set(seen);
   return { ready, records: scan.items.filter(item => !known.has(item.id)), fresh: ready ? scan.fresh : [],
-    seen: [...new Set([...scan.seen, ...seen])].slice(0, 3000), gap: scan.gap, cursor };
+    seen: [...new Set([...scan.seen, ...seen])].slice(0, 3000), gap: scan.gap, pages: scan.pages, cursor };
 }
 
 function recordScan(kind, result, state, settings) {
@@ -246,7 +258,7 @@ function recordScan(kind, result, state, settings) {
     .map(item => kind === 'live' ? { ...item, session: crypto.randomUUID() } : item));
   const records = result.records.map(item => ({ ...item, detected }));
   const note = !result.ready ? '已建立基线' : `${fresh.length} 条新提醒${result.gap ? '，页数不足，可能遗漏更早更新' : ''}`;
-  return { records, note };
+  return { records, note, queued: fresh.length };
 }
 
 function setGlobalIssue(state, events, source, issue) {
@@ -274,14 +286,18 @@ async function check(trigger, scheduledTime, context) {
   const checkedLanes = [...new Set(targets.map(lane))];
   state.lastAttempt = startedAt;
   state.lastTrigger = trigger;
-  let resetHistory = false;
   let refreshedCursor = false;
   let phase = 'account';
+  recordLog(events, 'check', `开始${triggerLabels[trigger]}。`);
   try {
     const account = await currentAccount();
     const mid = String(account.mid);
     if (state.account !== mid) {
-      resetHistory = Boolean(state.account);
+      const resetHistory = Boolean(state.account);
+      if (resetHistory) {
+        events.length = 0;
+        recordLog(events, 'account', '确认切换了 B 站账号，开始为当前账号重新建立基线。');
+      }
       const globalIssues = resetHistory ? {} : state.globalIssues;
       // 用随机标记隔离会话历史，换号时即使会话存储写入失败，也不会显示上一账号的异常。
       const diagnosticScope = resetHistory ? crypto.randomUUID() : state.diagnosticScope;
@@ -293,6 +309,11 @@ async function check(trigger, scheduledTime, context) {
     phase = 'check';
     // 各来源并行读取、分别记录错误，直播或动态接口失败不阻塞投稿检查。
     const due = targets.filter(kind => manual || !(state.sources[kind]?.retryAt > Date.now()));
+    for (const kind of targets.filter(kind => !due.includes(kind))) {
+      recordLog(events, kind, '仍在等待重试，本轮跳过。', {
+        level: 'warning', retryAt: state.sources[kind].retryAt
+      });
+    }
     const type = quickType(settings);
     const anchor = type === 'all' ? 'dynamic' : 'video';
     const dynamicFirst = settings.quickCheck && due.includes('dynamic') && due.includes('video') ? feed('all') : null;
@@ -306,6 +327,9 @@ async function check(trigger, scheduledTime, context) {
       const cursor = scans[due.indexOf(anchor)].value.cursor;
       state.quick = { ...state.quick, type, cursor };
       refreshedCursor = true;
+      if (!cursor) {
+        recordLog(events, 'quick', 'B 站未返回可用的快速检查基线，等待下次完整检查。', { level: 'warning' });
+      }
     }
     const records = [];
     let liveChecked = false;
@@ -319,7 +343,7 @@ async function check(trigger, scheduledTime, context) {
         const issue = describeIssue(scan.reason, { category: 'check', message: '检查此项目时发生异常。', code: null });
         state.sources[kind] = { failures, lastAttempt: checkedAt, lastSuccess: previous?.lastSuccess,
           retryAt: checkedAt + delay * 60000, error: issue.message, issue };
-        recordIssue(events, kind, issue, previous?.issue, checkedAt);
+        recordIssue(events, kind, issue, previous?.issue, checkedAt, state.sources[kind].retryAt);
         continue;
       }
       const result = recordScan(kind, scan.value, state, settings);
@@ -327,6 +351,13 @@ async function check(trigger, scheduledTime, context) {
       records.push(...result.records);
       state.sources[kind] = { note: result.note, lastAttempt: checkedAt, lastSuccess: checkedAt };
       state.lastSuccess = checkedAt;
+      const { ready, fresh, pages, gap } = scan.value;
+      const pageInfo = pages ? `读取 ${pages} 页，` : '';
+      const summary = ready
+        ? `发现 ${fresh.length} 条新内容，范围筛掉 ${fresh.length - result.queued} 条，${result.queued} 条加入待发队列。`
+        : '已建立基线，已有内容不推送。';
+      recordLog(events, kind, pageInfo + summary);
+      if (gap) recordLog(events, kind, '已达到检查页数上限，可能遗漏更早的更新。', { level: 'warning' });
       recordIssue(events, kind, null, previous?.issue, checkedAt);
     }
     records.sort((a, b) => (b.published || b.detected / 1000) - (a.published || a.detected / 1000));
@@ -336,7 +367,7 @@ async function check(trigger, scheduledTime, context) {
     state.error = sourceErrors(state, kinds);
     // 先落盘待发送列表，避免后台休眠时丢失整批通知。
     await chrome.storage.local.set({ state });
-    if (await flush(state, settings, liveChecked)) setGlobalIssue(state, events, 'notification', null);
+    if (await flush(state, settings, liveChecked, events)) setGlobalIssue(state, events, 'notification', null);
     else if (!state.pending.length) delete state.globalIssues.notification;
     setGlobalIssue(state, events, 'check', null);
     if (state.error || Object.keys(state.globalIssues).length) await badge('!');
@@ -353,7 +384,9 @@ async function check(trigger, scheduledTime, context) {
   await schedule(settings, state, reset);
   await scheduleQuick(settings, state, trigger !== 'quick' && (!refreshedCursor || Boolean(state.globalIssues.quick)));
   await chrome.storage.local.set({ state });
-  if (events.length || resetHistory) await updateIssueHistory(settings.issueLimit, state.diagnosticScope, events);
+  const failure = state.failures && events.findLast(event => event.issue);
+  if (failure) failure.retryAt = state.nextCheck;
+  await updateLogHistory(settings.issueLimit, state.diagnosticScope, events);
 }
 
 async function checkQuick(scheduledTime) {
@@ -367,6 +400,7 @@ async function checkQuick(scheduledTime) {
     return;
   }
   const events = [];
+  const hadIssue = Boolean(state.globalIssues.quick);
   let count = 0;
   let issue = null;
   try {
@@ -381,13 +415,16 @@ async function checkQuick(scheduledTime) {
   }
   setGlobalIssue(state, events, 'quick', issue);
   if (count > 0) {
+    recordLog(events, 'quick', `B 站报告 ${count} 条更新，开始读取内容列表。`, { repeat: 'message' });
     await check('quick', undefined, { settings, state, events });
     return;
   }
   await scheduleQuick(settings, state);
   await chrome.storage.local.set({ state });
-  if (events.length) await updateIssueHistory(settings.issueLimit, state.diagnosticScope, events);
-  if (issue || events.length) await badge(state.error || Object.keys(state.globalIssues).length ? '!' : '');
+  if (issue) events.at(-1).retryAt = quick.next;
+  else recordLog(events, 'quick', 'B 站返回 0 条更新，本轮未读取内容列表。', { repeat: 'message' });
+  await updateLogHistory(settings.issueLimit, state.diagnosticScope, events);
+  if (issue || hadIssue) await badge(state.error || Object.keys(state.globalIssues).length ? '!' : '');
 }
 
 async function saveSettings(input) {
@@ -410,13 +447,18 @@ async function saveSettings(input) {
   await chrome.storage.local.set({ settings, state });
   const warning = state.error || Object.keys(state.globalIssues).length;
   await badge(settings.enabled && kinds.length ? (warning ? '!' : '') : '停', '#64748b');
+  const events = [];
+  recordLog(events, 'check', !settings.enabled ? '设置已保存，已暂停自动检查。'
+    : !kinds.length ? '设置已保存，所有提醒类别均已关闭。'
+      : `设置已保存，自动检查已启用，快速检查${state.quick?.next ? '已排期' : '未排期'}。`);
+  await updateLogHistory(settings.issueLimit, state.diagnosticScope, events);
 }
 
 async function saveIssueLimit(limit) {
-  if (!ISSUE_LIMITS.includes(limit)) throw new Error('请选择有效的异常记录保留上限。');
+  if (!ISSUE_LIMITS.includes(limit)) throw new Error('请选择有效的日志保留上限。');
   const { settings, state } = await read();
   await chrome.storage.local.set({ settings: { ...settings, issueLimit: limit } });
-  await updateIssueHistory(limit, state.diagnosticScope);
+  await updateLogHistory(limit, state.diagnosticScope);
   return status();
 }
 
@@ -436,11 +478,10 @@ async function latestTestPost(kind) {
     offset = String(data.offset);
     offsets.add(offset);
   }
-  throw new Error(video ? '关注流里没有可用于测试的视频。' : '已检查的关注流里没有可用于测试的普通动态。');
+  throw new CheckError('no-sample', video ? '关注流里没有可用于测试的视频。' : '已检查的关注流里没有可用于测试的普通动态。');
 }
 
-async function testNotification(kind = 'video', demo = false) {
-  if (!KINDS.includes(kind) || (demo && kind !== 'live')) throw new Error('测试类型无效。');
+async function testNotification(kind, demo) {
   let item;
   if (demo) {
     item = { kind, id: 'demo', author: '示例 UP 主', title: '示例直播间 · 点击返回扩展设置' };
@@ -459,6 +500,24 @@ async function testNotification(kind = 'video', demo = false) {
   await notify(item, `test:${kind}:${item.id}:${crypto.randomUUID()}`, false, demo ? '【测试·演示样例】' : '【测试】');
   return { title: item.title };
 }
+async function runNotificationTest(kind = 'video', demo) {
+  if (!KINDS.includes(kind) || (demo && kind !== 'live')) throw new Error('测试类型无效。');
+  const { settings, state } = await read();
+  const events = [];
+  try {
+    const result = await testNotification(kind, demo);
+    recordLog(events, 'test', result.noLive ? '当前没有关注的 UP 主开播，可发送演示通知。'
+      : `${KIND_LABELS[kind]}测试：Edge 已接受通知。`);
+    return result;
+  } catch (error) {
+    const issue = describeIssue(error, { category: 'test', message: `${KIND_LABELS[kind]}测试通知未完成，请查看测试按钮旁的提示。` });
+    recordIssue(events, 'test', issue, null, Date.now());
+    throw error;
+  } finally {
+    await updateLogHistory(settings.issueLimit, state.diagnosticScope, events);
+  }
+}
+
 async function initialize() {
   await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
   const { settings, state } = await read();
@@ -468,7 +527,11 @@ async function initialize() {
 }
 async function resumeChecks() {
   await initialize();
-  await check('startup', Date.now());
+  const { settings, state } = await read();
+  const events = [];
+  recordLog(events, 'check', '收到 Edge 启动事件，已恢复检查排期。');
+  await updateLogHistory(settings.issueLimit, state.diagnosticScope, events);
+  await check('startup', Date.now(), { settings, state });
 }
 
 async function openNotificationPage(url) {
@@ -534,7 +597,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       case 'check': await check('manual'); return status();
       case 'save': await saveSettings(message.settings); return status();
       case 'issue-limit': return saveIssueLimit(message.limit);
-      case 'test': return testNotification(message.kind, message.demo === true);
+      case 'test': return runNotificationTest(message.kind, message.demo === true);
       default: throw new Error('未知操作');
     }
   });
