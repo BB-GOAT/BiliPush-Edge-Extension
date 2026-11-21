@@ -15,8 +15,6 @@ const emptyState = () => ({
   account: '', seen: [], baseline: false, dynamicSeen: [], dynamicBaseline: false,
   liveRooms: null, sources: {}, globalIssues: {}, diagnosticScope: null, pending: [], history: [], failures: 0
 });
-const triggerLabels = { alarm: '定时检查', manual: '手动检查', startup: 'Edge 启动后补查',
-  installed: '安装或更新后检查', quick: '快速检查发现更新' };
 const enabledKinds = settings => KINDS.filter(kind => settings.rules[kind].mode !== 'off');
 const isPost = kind => kind !== 'live';
 const lane = kind => isPost(kind) ? 'content' : 'live';
@@ -181,13 +179,15 @@ async function liveRooms() {
   }
   return liveFromResponse(await api('/xlive/web-ucenter/v1/xfetter/GetWebList?hit_ab=true', LIVE_ORIGIN));
 }
-async function flush(state, settings, liveChecked, events) {
+async function flush(state, settings, liveChecked, events, trigger) {
   const sent = {};
   try {
     await flushPending(state, settings, liveChecked, sent);
   } finally {
-    for (const [kind, count] of Object.entries(sent)) {
-      recordLog(events, 'notification', `${KIND_LABELS[kind]}：Edge 已接受 ${count} 条通知。`);
+    for (const [kind, accepted] of Object.entries(sent)) {
+      recordLog(events, 'notification', `${KIND_LABELS[kind]}：Edge 已接受 ${accepted.length} 条通知。`, {
+        trigger, items: { accepted }
+      });
     }
   }
   return Object.keys(sent).length > 0;
@@ -210,7 +210,7 @@ async function flushPending(state, settings, liveChecked, sent) {
       } catch {
         throw new CheckError('notification', '无法发送 Windows 通知，请检查 Edge 和 Windows 的通知设置。');
       }
-      sent[kind] = (sent[kind] ?? 0) + 1;
+      (sent[kind] ??= []).push(item);
     }
     state.pending.splice(index, 1);
     await chrome.storage.local.set({ state });
@@ -253,18 +253,22 @@ function recordScan(kind, result, state, settings) {
     state.pending = state.pending.filter(item => item.kind !== 'live' || active.has(item.id));
   }
   const detected = Date.now();
-  const fresh = result.fresh.filter(item => matches(item, settings));
-  state.pending.push(...fresh.sort((a, b) => (a.published ?? 0) - (b.published ?? 0))
+  const queued = [];
+  const filtered = [];
+  for (const item of result.fresh) {
+    (matches(item, settings) ? queued : filtered).push(item);
+  }
+  state.pending.push(...queued.sort((a, b) => (a.published ?? 0) - (b.published ?? 0))
     .map(item => kind === 'live' ? { ...item, session: crypto.randomUUID() } : item));
   const records = result.records.map(item => ({ ...item, detected }));
-  const note = !result.ready ? '已建立基线' : `${fresh.length} 条新提醒${result.gap ? '，页数不足，可能遗漏更早更新' : ''}`;
-  return { records, note, queued: fresh.length };
+  const note = !result.ready ? '已建立基线' : `${queued.length} 条新提醒${result.gap ? '，页数不足，可能遗漏更早更新' : ''}`;
+  return { records, note, filtered, queued };
 }
 
-function setGlobalIssue(state, events, source, issue) {
+function setGlobalIssue(state, events, source, issue, trigger) {
   const previous = state.globalIssues[source];
   const at = Date.now();
-  recordIssue(events, source, issue, previous, at);
+  recordIssue(events, source, issue, previous, at, { trigger });
   if (issue) state.globalIssues[source] = { ...issue, at, failures: (previous?.failures ?? 0) + 1 };
   else delete state.globalIssues[source];
 }
@@ -288,7 +292,6 @@ async function check(trigger, scheduledTime, context) {
   state.lastTrigger = trigger;
   let refreshedCursor = false;
   let phase = 'account';
-  recordLog(events, 'check', `开始${triggerLabels[trigger]}。`);
   try {
     const account = await currentAccount();
     const mid = String(account.mid);
@@ -296,7 +299,7 @@ async function check(trigger, scheduledTime, context) {
       const resetHistory = Boolean(state.account);
       if (resetHistory) {
         events.length = 0;
-        recordLog(events, 'account', '确认切换了 B 站账号，开始为当前账号重新建立基线。');
+        recordLog(events, 'account', '确认切换了 B 站账号，开始为当前账号重新建立基线。', { trigger });
       }
       const globalIssues = resetHistory ? {} : state.globalIssues;
       // 用随机标记隔离会话历史，换号时即使会话存储写入失败，也不会显示上一账号的异常。
@@ -305,13 +308,13 @@ async function check(trigger, scheduledTime, context) {
         globalIssues, diagnosticScope, plan: state.plan };
     }
     state.accountName = String(account.uname ?? mid);
-    setGlobalIssue(state, events, 'account', null);
+    setGlobalIssue(state, events, 'account', null, trigger);
     phase = 'check';
     // 各来源并行读取、分别记录错误，直播或动态接口失败不阻塞投稿检查。
     const due = targets.filter(kind => manual || !(state.sources[kind]?.retryAt > Date.now()));
     for (const kind of targets.filter(kind => !due.includes(kind))) {
       recordLog(events, kind, '仍在等待重试，本轮跳过。', {
-        level: 'warning', retryAt: state.sources[kind].retryAt
+        level: 'warning', retryAt: state.sources[kind].retryAt, trigger
       });
     }
     const type = quickType(settings);
@@ -328,7 +331,7 @@ async function check(trigger, scheduledTime, context) {
       state.quick = { ...state.quick, type, cursor };
       refreshedCursor = true;
       if (!cursor) {
-        recordLog(events, 'quick', 'B 站未返回可用的快速检查基线，等待下次完整检查。', { level: 'warning' });
+        recordLog(events, 'quick', 'B 站未返回可用的快速检查基线，等待下次完整检查。', { level: 'warning', trigger });
       }
     }
     const records = [];
@@ -343,7 +346,7 @@ async function check(trigger, scheduledTime, context) {
         const issue = describeIssue(scan.reason, { category: 'check', message: '检查此项目时发生异常。', code: null });
         state.sources[kind] = { failures, lastAttempt: checkedAt, lastSuccess: previous?.lastSuccess,
           retryAt: checkedAt + delay * 60000, error: issue.message, issue };
-        recordIssue(events, kind, issue, previous?.issue, checkedAt, state.sources[kind].retryAt);
+        recordIssue(events, kind, issue, previous?.issue, checkedAt, { retryAt: state.sources[kind].retryAt, trigger });
         continue;
       }
       const result = recordScan(kind, scan.value, state, settings);
@@ -352,13 +355,15 @@ async function check(trigger, scheduledTime, context) {
       state.sources[kind] = { note: result.note, lastAttempt: checkedAt, lastSuccess: checkedAt };
       state.lastSuccess = checkedAt;
       const { ready, fresh, pages, gap } = scan.value;
+      const { filtered, queued } = result;
       const pageInfo = pages ? `读取 ${pages} 页，` : '';
-      const summary = ready
-        ? `发现 ${fresh.length} 条新内容，范围筛掉 ${fresh.length - result.queued} 条，${result.queued} 条加入待发队列。`
-        : '已建立基线，已有内容不推送。';
-      recordLog(events, kind, pageInfo + summary);
-      if (gap) recordLog(events, kind, '已达到检查页数上限，可能遗漏更早的更新。', { level: 'warning' });
-      recordIssue(events, kind, null, previous?.issue, checkedAt);
+      const summary = !ready ? '已建立基线，已有内容不推送。' : fresh.length
+        ? `发现 ${fresh.length} 条新内容，筛掉 ${filtered.length} 条，${queued.length} 条加入待发队列。`
+        : kind === 'live' ? '没有新开播。' : '没有新内容。';
+      recordLog(events, kind, pageInfo + summary, { trigger, items: { filtered, queued },
+        repeat: ready && !fresh.length && !gap && trigger === 'alarm' ? 'message' : null });
+      if (gap) recordLog(events, kind, '已达到检查页数上限，可能遗漏更早的更新。', { level: 'warning', trigger });
+      recordIssue(events, kind, null, previous?.issue, checkedAt, { trigger });
     }
     records.sort((a, b) => (b.published || b.detected / 1000) - (a.published || a.detected / 1000));
     state.history = [...records, ...state.history].slice(0, 100);
@@ -367,15 +372,15 @@ async function check(trigger, scheduledTime, context) {
     state.error = sourceErrors(state, kinds);
     // 先落盘待发送列表，避免后台休眠时丢失整批通知。
     await chrome.storage.local.set({ state });
-    if (await flush(state, settings, liveChecked, events)) setGlobalIssue(state, events, 'notification', null);
+    if (await flush(state, settings, liveChecked, events, trigger)) setGlobalIssue(state, events, 'notification', null, trigger);
     else if (!state.pending.length) delete state.globalIssues.notification;
-    setGlobalIssue(state, events, 'check', null);
+    setGlobalIssue(state, events, 'check', null, trigger);
     if (state.error || Object.keys(state.globalIssues).length) await badge('!');
     else await badge(settings.enabled ? '' : '停', '#64748b');
   } catch (error) {
     const source = error instanceof CheckError && error.category === 'notification' ? 'notification' : phase;
     const issue = describeIssue(error, { category: 'check', message: '扩展运行异常，请重新打开设置页后重试。', code: null });
-    setGlobalIssue(state, events, source, issue);
+    setGlobalIssue(state, events, source, issue, trigger);
     state.failures = (state.failures || 0) + 1;
     state.error = issue.message;
     await badge('!');

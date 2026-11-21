@@ -67,6 +67,14 @@
 .log-warning { color: #824700; }
 .log-error { color: #a52a35; }
 .log-retry { display: block; margin-top: 4px; }
+.log-trigger { display: inline-block; margin: 0 6px 2px 0; padding: 1px 6px; border-radius: 4px; background: #eef3f8; color: #52657a; font-size: 12px; }
+.log-details { margin-top: 6px; border-left: 2px solid #e2eaf2; padding-left: 10px; }
+.log-details > summary { color: #175c96; cursor: pointer; width: fit-content; }
+.log-outcome { margin: 9px 0 3px; font-size: 13px; font-weight: 600; }
+.log-details ul { margin: 0; padding-left: 18px; }
+.log-details li + li { margin-top: 3px; }
+.log-details small { display: block; color: #52657a; }
+.log-details .hint { margin: 3px 0 0; }
 @media (max-width: 630px) {
   .overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .overview div:first-child { grid-column: 1 / -1; }

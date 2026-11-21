@@ -6,6 +6,7 @@ const $ = id => document.getElementById(id);
 let busy = false;
 let loaded = false;
 let logEntries = [];
+const expandedLogDetails = new Set();
 let refreshPending = false;
 const time = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
 const compactTime = value => {
@@ -18,6 +19,11 @@ const compactTime = value => {
 const CHECK_LABELS = { ...KIND_LABELS, account: '登录检查', notification: '通知发送',
   check: '扩展运行', quick: '快速检查', test: '测试通知' };
 const LOG_LEVELS = { info: '信息', warning: '警告', error: '错误' };
+const LOG_OUTCOMES = {
+  filtered: '被筛掉（不在本类别的提醒范围内）',
+  queued: '加入待发队列',
+  accepted: 'Edge 已接受通知'
+};
 const TRIGGER_LABELS = { alarm: '定时检查', manual: '手动检查', startup: 'Edge 启动',
   installed: '安装或更新后检查', quick: '快速检查发现更新' };
 const issueText = ({ message, code }) => code && !message.includes(code)
@@ -142,12 +148,67 @@ function renderStatus(settings, state) {
 
 function renderDiagnostics(settings, { entries, available }) {
   logEntries = entries;
+  const detailIds = new Set(entries.map(entry => entry.details?.id));
+  for (const id of expandedLogDetails) {
+    if (!detailIds.has(id)) expandedLogDetails.delete(id);
+  }
   $('log-limit').value = settings.issueLimit;
   $('log-count').textContent = available ? `${entries.length} 条记录` : '日志暂不可用';
   const feedback = $('log-feedback');
   feedback.textContent = available ? '' : '当前无法保存或读取会话日志，仍可在运行状态中查看最新错误。';
   feedback.hidden = available;
   renderLogs();
+}
+
+function renderLogDetails({ id, groups }) {
+  const details = document.createElement('details');
+  details.className = 'log-details';
+  details.open = expandedLogDetails.has(id);
+  details.addEventListener('toggle', () => {
+    if (!details.isConnected) return;
+    if (details.open) {
+      expandedLogDetails.add(id);
+      if (details.children.length === 1) appendLogGroups(details, groups);
+    } else {
+      expandedLogDetails.delete(id);
+    }
+  });
+  const summary = document.createElement('summary');
+  summary.textContent = '查看条目明细';
+  details.append(summary);
+  if (details.open) appendLogGroups(details, groups);
+  return details;
+}
+
+function appendLogGroups(details, groups) {
+  for (const { outcome, total, items } of groups) {
+    const heading = document.createElement('p');
+    heading.className = 'log-outcome';
+    heading.textContent = `${LOG_OUTCOMES[outcome]} · ${total} 条`;
+    const list = document.createElement('ul');
+    for (const { kind, id, title, author } of items) {
+      const entry = document.createElement('li');
+      const url = itemUrl(kind, id);
+      const name = document.createElement(url ? 'a' : 'span');
+      name.textContent = title || '查看原内容';
+      if (url) {
+        name.href = url;
+        name.target = '_blank';
+        name.rel = 'noreferrer';
+      }
+      const creator = document.createElement('small');
+      creator.textContent = author;
+      entry.append(name, creator);
+      list.append(entry);
+    }
+    details.append(heading, list);
+    if (items.length < total) {
+      const omitted = document.createElement('p');
+      omitted.className = 'hint';
+      omitted.textContent = `另有 ${total - items.length} 条未展开显示。`;
+      details.append(omitted);
+    }
+  }
 }
 
 function renderLogs() {
@@ -160,7 +221,7 @@ function renderLogs() {
   $('logs').hidden = entries.length === 0;
   const list = $('log-list');
   const rows = document.createDocumentFragment();
-  for (const { source, level, issue, message, retryAt, firstAt, lastAt, count } of entries) {
+  for (const { source, level, issue, message, retryAt, firstAt, lastAt, count, trigger, details } of entries) {
     const row = document.createElement('tr');
     const when = row.insertCell();
     when.textContent = time(lastAt);
@@ -172,7 +233,13 @@ function renderLogs() {
     severity.className = `log-${level}`;
     row.insertCell().textContent = CHECK_LABELS[source];
     const detail = row.insertCell();
-    detail.textContent = issue ? issueText(issue) : message;
+    if (TRIGGER_LABELS[trigger]) {
+      const label = document.createElement('span');
+      label.className = 'log-trigger';
+      label.textContent = TRIGGER_LABELS[trigger];
+      detail.append(label);
+    }
+    detail.append(issue ? issueText(issue) : message);
     if (count > 1) detail.append(`（共 ${count} 次）`);
     if (retryAt) {
       const retry = document.createElement('small');
@@ -180,6 +247,7 @@ function renderLogs() {
       retry.textContent = `最早重试时间 ${time(retryAt)}`;
       detail.append(retry);
     }
+    if (details) detail.append(renderLogDetails(details));
     rows.append(row);
   }
   list.replaceChildren(rows);

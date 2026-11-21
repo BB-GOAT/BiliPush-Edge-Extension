@@ -2,6 +2,7 @@ import { CheckError } from './core.js';
 
 // 沿用会话存储键与账号隔离标记，日志不会写入本地存储。
 export const LOG_KEY = 'recentIssues';
+const ITEM_LIMIT = 20;
 let writeFailed = false;
 
 export function describeIssue(error, fallback) {
@@ -13,17 +14,25 @@ const warningCategories = new Set(['login', 'permission', 'rate-limit', 'rejecte
 const issueLevel = issue => warningCategories.has(issue.category) ? 'warning' : 'error';
 const sameIssue = (first, second) => first?.category === second.category && first?.code === second.code;
 
-export function recordIssue(events, source, issue, previous, at, retryAt = null) {
+export function recordIssue(events, source, issue, previous, at, { retryAt, trigger } = {}) {
   if (issue) {
-    events.push({ source, level: issueLevel(issue), issue, at, retryAt,
+    events.push({ source, level: issueLevel(issue), issue, at, retryAt, trigger,
       repeat: sameIssue(previous, issue) ? 'issue' : null });
   } else if (previous) {
-    events.push({ source, level: 'info', issue: null, message: '已恢复', at });
+    events.push({ source, level: 'info', issue: null, message: '已恢复', at, trigger });
   }
 }
 
-export function recordLog(events, source, message, { level = 'info', repeat = null, retryAt = null } = {}) {
-  events.push({ source, level, message, at: Date.now(), repeat, retryAt });
+export function recordLog(events, source, message, { level = 'info', repeat, retryAt, trigger, items } = {}) {
+  const groups = Object.entries(items ?? {}).filter(([, records]) => records.length)
+    .map(([outcome, records]) => ({ outcome, total: records.length,
+      items: records.slice(0, ITEM_LIMIT).map(({ kind, id, author, title }) => ({
+        kind: kind ?? 'video', id, author: String(author ?? '').slice(0, 80),
+        title: String(title ?? '').slice(0, 180)
+      }))
+    }));
+  const details = groups.length ? { id: crypto.randomUUID(), groups } : undefined;
+  events.push({ source, level, message, at: Date.now(), repeat, retryAt, trigger, details });
 }
 
 async function readEntries(scope) {
@@ -48,15 +57,16 @@ export async function readLogHistory(limit, scope = null) {
 export async function updateLogHistory(limit, scope = null, events = []) {
   try {
     const entries = await readEntries(scope);
-    for (const { source, level, issue, message, at, repeat, retryAt } of events) {
+    for (const { source, level, issue, message, at, repeat, retryAt, trigger, details } of events) {
       const index = repeat ? entries.findLastIndex(entry =>
         entry.source === source && (repeat !== 'issue' || Object.hasOwn(entry, 'issue'))) : -1;
       const previous = entries[index];
       const merged = previous && (repeat === 'issue' ? sameIssue(previous.issue, issue)
-        : previous.message === message && previous.level === level);
+        : !details && !previous.details && previous.message === message && previous.level === level && previous.trigger === trigger);
       if (merged) entries.splice(index, 1);
       entries.push({ source, level, ...(issue !== undefined && { issue }), ...(message && { message }),
-        ...(retryAt && { retryAt }), firstAt: merged ? previous.firstAt : at,
+        ...(retryAt && { retryAt }), ...(trigger && { trigger }), ...(details && { details }),
+        firstAt: merged ? previous.firstAt : at,
         lastAt: at, count: merged ? previous.count + 1 : 1 });
     }
     await chrome.storage.session.set({ [LOG_KEY]: { scope, entries: entries.slice(-limit) } });

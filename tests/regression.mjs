@@ -504,9 +504,22 @@ await message('check');
 equal(sent.slice(sentBeforeNewKinds).map(entry => entry.id.replace(/^(live:\d+):.+$/, '$1')),
   ['video:BV0000000009', 'dynamic:2002', 'dynamic:2005', 'live:3002']);
 const firstLive = sent.at(-1).id;
-equal(sessionStore.recentIssues.entries.findLast(entry => entry.source === 'dynamic').message,
-  '读取 1 页，发现 3 条新内容，范围筛掉 1 条，2 条加入待发队列。');
-equal(JSON.stringify(sessionStore).includes('动态作者'), false);
+const dynamicLog = sessionStore.recentIssues.entries.findLast(entry => entry.source === 'dynamic');
+equal(dynamicLog.message, '读取 1 页，发现 3 条新内容，筛掉 1 条，2 条加入待发队列。');
+equal(dynamicLog.trigger, 'manual');
+equal(dynamicLog.details.groups, [
+  { outcome: 'filtered', total: 1, items: [
+    { kind: 'dynamic', id: '2003', author: '动态作者', title: '动态 3' }
+  ] },
+  { outcome: 'queued', total: 2, items: [
+    { kind: 'dynamic', id: '2002', author: '动态作者', title: '动态 2' },
+    { kind: 'dynamic', id: '2005', author: '动态作者', title: '动态 5' }
+  ] }
+]);
+const acceptedLog = sessionStore.recentIssues.entries.findLast(entry =>
+  entry.source === 'notification' && entry.message.startsWith('普通动态'));
+equal(acceptedLog.details.groups, [{ ...dynamicLog.details.groups[1], outcome: 'accepted' }]);
+equal(acceptedLog.trigger, 'manual');
 await chrome.notifications.onClicked.listener('dynamic:2002');
 equal(opened.at(-1).url, 'https://t.bilibili.com/2002');
 await chrome.notifications.onClicked.listener(firstLive);
@@ -636,7 +649,7 @@ equal(JSON.stringify(sessionStore).includes('模拟'), false);
 equal(Object.hasOwn(store, 'recentIssues'), false);
 equal(entries[0].level, 'warning');
 equal(entries[0].retryAt, store.state.sources.live.retryAt);
-equal(Object.keys(entries[0]), ['source', 'level', 'issue', 'retryAt', 'firstAt', 'lastAt', 'count']);
+equal(Object.keys(entries[0]), ['source', 'level', 'issue', 'retryAt', 'trigger', 'firstAt', 'lastAt', 'count']);
 dynamicError = undefined;
 liveHttpStatus = 0;
 await message('check');
@@ -852,6 +865,7 @@ result = await tick(quickAlarm);
 equal(result.state.account, '999');
 equal(result.diagnostics.entries.some(entry => entry.message?.includes('确认切换了 B 站账号')), true);
 equal(result.diagnostics.entries.some(entry => entry.source === 'quick' && entry.message?.includes('B 站报告')), false);
+equal(result.diagnostics.entries.some(entry => entry.details), false);
 equal(result.state.quick.cursor, updateBaseline);
 equal(result.state.history.every(entry => entry.detected === clock), true);
 equal(sent.length, beforeQuickAccount);
@@ -872,6 +886,21 @@ equal(probeCalls.length, beforePause);
 await message('save', { settings: { quickCheck: false, enabled: true, interval: 3, mode: 'all' } });
 equal(alarms.has(quickAlarm), false);
 equal(store.state.plan.content - clock, 3 * 60000);
+// 连续无新开播的定时检查只保留直播结果，手动检查仍单独记录。
+rooms = [];
+await message('save', { settings: { rules: {
+  video: { mode: 'off' }, dynamic: { mode: 'off' }, live: { mode: 'all' }
+} } });
+await message('check');
+delete sessionStore.recentIssues;
+const firstLivePoll = await tick('check-videos');
+const secondLivePoll = await tick('check-videos');
+equal(secondLivePoll.diagnostics.entries, [{
+  source: 'live', level: 'info', message: '没有新开播。', trigger: 'alarm',
+  firstAt: firstLivePoll.diagnostics.entries[0].firstAt, lastAt: clock, count: 2
+}]);
+const manualLivePoll = await message('check');
+equal(manualLivePoll.diagnostics.entries.map(entry => [entry.trigger, entry.count]), [['manual', 1], ['alarm', 2]]);
 Date.now = realNow;
 
 // 兼容旧格式的会话异常历史，日志正文不包含旧账号内容。
@@ -883,6 +912,20 @@ const migratedLog = (await message('status')).diagnostics.entries[0];
 equal(migratedLog.level, 'warning');
 equal(migratedLog.issue, legacyIssue);
 equal(migratedLog.count, 2);
+equal(migratedLog.details, undefined);
+
+// 日志只保留限长标题与作者，条目数量受上限约束，报告仍显示总数。
+const { recordLog, updateLogHistory } = await import(new URL('src/diagnostics.js', root));
+const batch = [];
+const longRecord = { kind: 'video', id: 'BV0000000007', uid: '123', author: '甲'.repeat(200),
+  title: '乙'.repeat(500), url: 'https://example.test' };
+recordLog(batch, 'video', '大量新投稿', { items: { queued: Array(25).fill(longRecord) } });
+await updateLogHistory(store.settings.issueLimit, store.state.diagnosticScope, batch);
+const capped = (await message('status')).diagnostics.entries[0].details.groups[0];
+equal(capped.total, 25);
+equal(capped.items.length, 20);
+equal(capped.items[0], { kind: 'video', id: longRecord.id, author: '甲'.repeat(80), title: '乙'.repeat(180) });
+equal(Object.hasOwn(store, 'recentIssues'), false);
 
 // 设置页无 tab、携带查询/锚点时同样合法；相似地址与其他来源不能操作后台。
 equal((await request({ type: 'status' }, {
