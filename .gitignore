@@ -2,6 +2,9 @@ node_modules/
 dist/
 coverage/
 *.zip
+*.crx
+*.pem
+*.key
 *.log
 *.tmp
 .env
