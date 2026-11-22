@@ -7,4 +7,4 @@
 - 保持首次基线、账号隔离、BV 去重、失败退避和待发送队列行为。修改存储结构前设计兼容读取/迁移，不清空用户数据。
 - 修复已知缺陷时补有意义的回归场景。执行 node scripts/check.mjs 与 git diff --check；如需 Edge 实测，明确区分已完成与待用户验证。
 - 临时文件统一放 E:\Codex\BiliPush-Edge-Extension，不写源码目录或 .codex。确认不再需要且无其他任务占用后清理；需要用户实测的证据说明保留原因。
-- GitHub 发布按 docs/MAINTAINING.md 执行。只有用户授权后才创建远端、推送代码或修改仓库可见性。GitHub Actions 对主分支的版本更新提交自动打 Tag 并发布签名 CRX。商店发布需单独授权。ZIP 与 CRX 只打包 manifest.json、src/、assets/。
+- GitHub 发布按 docs/MAINTAINING.md 执行。只有用户授权后才创建远端、推送代码或修改仓库可见性。GitHub Actions 对主分支的版本更新提交自动打 Tag 并发布 ZIP。商店发布需单独授权。正式 ZIP 使用 scripts/package.ps1，显式指定输出目录，只打包 manifest.json、src/、assets/。

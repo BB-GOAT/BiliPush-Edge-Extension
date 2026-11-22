@@ -3,7 +3,7 @@ set -euo pipefail
 
 tag="v$VERSION"
 ref="refs/tags/$tag"
-asset="BiliPush-Edge-$VERSION.crx"
+asset="BiliPush-Edge-$VERSION.zip"
 commit=$(git rev-parse HEAD)
 
 # 复用指向同一提交的 Tag，保留已发布的版本与附件。

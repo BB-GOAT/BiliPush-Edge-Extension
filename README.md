@@ -11,12 +11,10 @@
 
 ## 安装与使用
 
-1. 从 [Releases](https://github.com/BB-GOAT/BiliPush-Edge-Extension/releases) 下载所需版本。首次使用推荐下载 **Source code (zip)** 并解压，找到包含 `manifest.json` 的目录。
+1. 打开 [Releases](https://github.com/BB-GOAT/BiliPush-Edge-Extension/releases)，在对应版本的 **Assets** 中下载 `BiliPush-Edge-<版本号>.zip`（例如 `BiliPush-Edge-1.0.0.zip`），解压到你希望长期保留的目录。解压后目录内应直接看到 `manifest.json`。
 2. 在 Edge 打开 `edge://extensions/`，开启「开发人员模式」，选择「加载解压缩的扩展」，并选中上一步的目录。
 3. 在同一个 Edge 配置文件登录 B 站。点击扩展图标打开设置，使用「立即检查」和测试通知确认可以正常使用。
-4. 更新时，把新版文件解压到原安装目录，再从扩展管理页点「重新加载」。保留原目录和安装记录即可沿用设置，卸载扩展会清除它的本地数据。
-
-Releases 同时提供已签名的 `.crx`。如果 Edge 策略限制安装该包，可以使用上述解压安装方式。
+4. 更新时，下载新版的 `BiliPush-Edge-<版本号>.zip`，将文件解压覆盖到原安装目录，再从扩展管理页点「重新加载」。保留原目录和安装记录即可沿用设置，卸载扩展会清除它的本地数据。
 
 ## 关窗后继续提醒
 

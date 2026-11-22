@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build:
-    name: 回归检查与 CRX 构建
+    name: 回归检查与 ZIP 构建
     runs-on: ubuntu-latest
     outputs:
       releases: ${{ steps.plan.outputs.releases }}
@@ -25,8 +25,6 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
-      - name: 检查扩展
-        run: node scripts/check.mjs
       - name: 识别更新版本号的提交
         id: plan
         env:
@@ -34,22 +32,15 @@ jobs:
           BEFORE: ${{ github.event.before }}
           COMMIT: ${{ github.sha }}
         run: node scripts/release-plan.mjs "$EVENT" "$BEFORE" "$COMMIT"
-      - name: 验证测试分支可以打包
-        if: github.ref != 'refs/heads/main'
-        run: node scripts/package-crx.mjs "$RUNNER_TEMP/check.crx" --ephemeral
-      - name: 构建已签名的 CRX
-        if: github.ref == 'refs/heads/main'
-        env:
-          CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
-          CRX_EXTENSION_ID: ${{ vars.CRX_EXTENSION_ID }}
-          VERSION: ${{ steps.plan.outputs.version }}
-        run: node scripts/package-crx.mjs "$RUNNER_TEMP/BiliPush-Edge-$VERSION.crx"
+      - name: 检查并构建扩展 ZIP
+        shell: pwsh
+        run: ./scripts/package.ps1 -OutputDirectory $env:RUNNER_TEMP -Release
       - name: 保存主分支构建产物
         if: github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: BiliPush-Edge-${{ steps.plan.outputs.version }}-${{ github.sha }}
-          path: ${{ runner.temp }}/BiliPush-Edge-${{ steps.plan.outputs.version }}.crx
+          path: ${{ runner.temp }}/BiliPush-Edge-${{ steps.plan.outputs.version }}.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -74,18 +65,14 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
-      - name: 检查版本提交并提取更新说明
+      - name: 提取版本更新说明
         env:
           VERSION: ${{ matrix.version }}
         run: |
-          node scripts/check.mjs
           node scripts/release-plan.mjs notes "$VERSION" "$RUNNER_TEMP/release-notes.md"
-      - name: 签署该提交的 CRX
-        env:
-          CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
-          CRX_EXTENSION_ID: ${{ vars.CRX_EXTENSION_ID }}
-          VERSION: ${{ matrix.version }}
-        run: node scripts/package-crx.mjs "$RUNNER_TEMP/BiliPush-Edge-$VERSION.crx"
+      - name: 检查并打包版本提交
+        shell: pwsh
+        run: ./scripts/package.ps1 -OutputDirectory $env:RUNNER_TEMP -Release
       - name: 创建 Tag 并发布 Release
         env:
           GH_TOKEN: ${{ github.token }}

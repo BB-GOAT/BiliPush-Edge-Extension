@@ -46,9 +46,8 @@ BiliPush-Edge-Extension/
 ├── scripts/
 │   ├── check.mjs              # 统一检查入口
 │   ├── package.ps1            # 本地白名单 ZIP 打包
-│   ├── package-crx.mjs        # 从指定 Git 提交构建签名 CRX3
 │   ├── release-plan.mjs       # 找到主分支上每个版本变更提交
-│   └── publish-release.sh     # 用准确的 Git Tag 和 CRX 发布 Release
+│   └── publish-release.sh     # 用准确的 Git Tag 和 ZIP 发布 Release
 ├── docs/
 │   ├── MAINTAINING.md          # 开发、本地打包与 GitHub 发布流程
 │   ├── ARCHITECTURE.md         # 数据流、状态字段、模块边界、接口依赖
@@ -103,12 +102,10 @@ git commit -m '修复：说明具体触发条件与结果'
 
 ## GitHub 构建与发布
 
-- Pull Request 会运行回归检查，并用临时密钥验证 CRX 打包。推送到 `main` 会在 [Actions](https://github.com/BB-GOAT/BiliPush-Edge-Extension/actions) 生成已签名的构建产物，保留 7 天。普通提交和手动运行只构建。
-- 发布新版时，同一提交里将 `manifest.json` 和 `package.json` 的版本同步提高，并在 `CHANGELOG.md` 新增 `## 版本号` 小节，写明用户可感知的变化。将提交推送或合并到 `main` 后，Actions 会把 `v版本号` Tag 指向主分支上版本实际变化的提交，将该提交的 `.crx` 和更新说明放到 [Releases](https://github.com/BB-GOAT/BiliPush-Edge-Extension/releases)。
-- 初次发布已有的 `1.0.0` 使用一次性的 `Release-Bootstrap: v1.0.0` 提交尾注。以后升级只需走上面的版本变更流程。
+- Pull Request 会运行回归检查并构建扩展 ZIP。推送到 `main` 后，可在 [Actions](https://github.com/BB-GOAT/BiliPush-Edge-Extension/actions) 下载构建产物，保留 7 天。普通提交和手动运行只构建。
+- 发布新版时，同一提交里将 `manifest.json` 和 `package.json` 的版本同步提高，并在 `CHANGELOG.md` 新增 `## 版本号` 小节，写明用户可感知的变化。将提交推送或合并到 `main` 后，Actions 会把 `v版本号` Tag 指向主分支上版本实际变化的提交，将该提交的 `BiliPush-Edge-<版本号>.zip` 和更新说明放到 [Releases](https://github.com/BB-GOAT/BiliPush-Edge-Extension/releases)。
 - 打包或发布失败时，在 Actions 查看日志，再重跑原工作流。相同提交已有 Tag 时可以继续发布。若 Tag 已经指向另一提交，工作流会停止。
-- GitHub Actions 使用仓库 Secret `CRX_PRIVATE_KEY`（RSA PEM 签名私钥）和变量 `CRX_EXTENSION_ID`（预期扩展 ID）。后续构建沿用同一把私钥。迁移仓库时需要迁移这两项，签名私钥在配置 GitHub Secret 时已为当前 Windows 用户保留一份 DPAPI 加密的本机备份；它需要原 Windows 用户环境解密。
-- `.crx` 供手动分发。当前从本地目录加载的用户可以继续用原目录和「重新加载」更新，保留自己的配置。GitHub Release 不会向已安装扩展推送自动更新。
+- Actions 用 `scripts/package.ps1 -OutputDirectory <目录> -Release` 构建 ZIP，解压后可在 Edge 中加载。已经安装的用户可以将新版文件解压到原目录并点「重新加载」，以保留现有设置。
 
 ## Git 基线与回退
 

@@ -37,11 +37,8 @@ function plan() {
     const commits = git('rev-list', '--first-parent', '--reverse', `${before}..${head}`).trim().split(/\s+/).filter(Boolean);
     for (const sha of commits) {
       const current = versionAt(sha);
-      // 初始版本已经固定，首次分发用提交尾注单独触发。
-      const bootstrap = current === '1.0.0' && current === previous
-        && git('show', '-s', '--format=%(trailers:key=Release-Bootstrap,valueonly)', sha).trim() === 'v1.0.0';
-      if (current === previous && !bootstrap) continue;
-      if (!bootstrap && current.localeCompare(previous, 'en', { numeric: true }) <= 0) {
+      if (current === previous) continue;
+      if (current.localeCompare(previous, 'en', { numeric: true }) <= 0) {
         throw new Error(`${sha} 将版本从 ${previous} 降到 ${current}。Release 版本必须递增。`);
       }
       notesAt(sha, current);
