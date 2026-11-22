@@ -43,7 +43,18 @@ equal(normalizeSettings({ maxPages: 99 }).maxPages, 10);
 equal(normalizeSettings({}).issueLimit, 50);
 equal(normalizeSettings({ issueLimit: 99 }).issueLimit, 50);
 equal(normalizeSettings({ mode: 'selected', uids: ['10', 'abc', '10'] }).rules, {
-  video: { mode: 'selected', uids: ['10'] }, dynamic: { mode: 'off', uids: [] }, live: { mode: 'off', uids: [] }
+  video: { mode: 'selected', listMode: 'allow', uids: ['10'] },
+  dynamic: { mode: 'off', listMode: 'allow', uids: [] },
+  live: { mode: 'off', listMode: 'allow', uids: [] }
+});
+equal(normalizeSettings({ rules: {
+  video: { mode: 'selected', listMode: 'allow', uids: ['10'], blockedUids: ['20'] },
+  dynamic: { mode: 'selected', listMode: 'block', uids: ['10'], blockedUids: [20, '20', '无效 UID'] },
+  live: { mode: 'selected', listMode: 'block', uids: ['10'], blockedUids: [] }
+} }).rules, {
+  video: { mode: 'selected', listMode: 'allow', uids: ['10'] },
+  dynamic: { mode: 'selected', listMode: 'block', uids: ['20'] },
+  live: { mode: 'selected', listMode: 'block', uids: [] }
 });
 equal(videoFromItem({ ...item(1), type: 'DYNAMIC_TYPE_FORWARD' }), null);
 equal(videoFromItem({ type: 'DYNAMIC_TYPE_AV' }), null);
@@ -261,7 +272,7 @@ function fireAlarm(name = 'check-videos') {
 // 首次基线、定时新投稿与重复查询。
 await message('check');
 equal(store.state.lastTrigger, 'manual');
-equal(store.settings.rules.video, { mode: 'all', uids: ['77'] });
+equal(store.settings.rules.video, { mode: 'all', listMode: 'allow', uids: ['77'] });
 equal(store.state.baseline, true);
 equal(sent.length, 0);
 equal(store.state.account, '100');
@@ -952,6 +963,55 @@ equal(chrome.runtime.onMessage.listener({ type: 'status' }, {
   id: 'another-extension', url: chrome.runtime.getURL(optionsPage)
 }, () => { externalResponse = true; }), undefined);
 equal(externalResponse, false);
+
+// 三种内容共享同一套黑白名单规则，切换模式时保留各自的勾选和已检查进度。
+mid = '400';
+feed = [item(1)];
+dynamics = [dynamic(1)];
+rooms = [room(1)];
+const listRules = {
+  video: { mode: 'selected', listMode: 'block', uids: ['10'] },
+  dynamic: { mode: 'selected', listMode: 'block', uids: ['10'] },
+  live: { mode: 'selected', listMode: 'block', uids: ['10'] }
+};
+const beforeListChecks = sent.length;
+await message('save', { settings: { rules: listRules, quickCheck: false } });
+await message('check');
+equal(sent.length, beforeListChecks);
+equal((await message('status')).settings.rules, listRules);
+
+feed = [item(2, '10'), item(3, '20'), ...feed];
+dynamics = [dynamic(2, '10'), dynamic(3, '20'), ...dynamics];
+rooms.push(room(2, '10'), room(3, '20'));
+await message('check');
+equal(sent.slice(beforeListChecks).map(entry => entry.id.replace(/^(live:\d+):.+$/, '$1')),
+  ['video:BV0000000003', 'dynamic:2003', 'live:3003']);
+equal(sessionStore.recentIssues.entries.findLast(entry => entry.source === 'live').details.groups[0], {
+  outcome: 'filtered', total: 1, items: [{ kind: 'live', id: '3002', author: '主播', title: '直播 2' }]
+});
+
+// 只改名单模式，同一批勾选继续生效，并保留其他类别的名单和模式。
+const beforeModeSwitch = sent.length;
+const allowRules = { ...listRules, video: { ...listRules.video, listMode: 'allow' } };
+await message('save', { settings: { rules: allowRules, quickCheck: false } });
+equal((await message('status')).settings.rules, allowRules);
+feed = [item(4, '10'), item(5, '20'), ...feed];
+await message('check');
+equal(sent.slice(beforeModeSwitch).map(entry => entry.id), ['video:BV0000000004']);
+
+// 已排队的通知也要应用新名单，空黑名单则允许所有关注内容进入队列。
+const beforeRetryList = sent.length;
+const videoList = { ...listRules.video, uids: [] };
+await message('save', { settings: { rules: { ...listRules, video: videoList }, quickCheck: false } });
+feed = [item(6, '10'), item(7, '20'), ...feed];
+notificationFail = true;
+await message('check');
+equal(store.state.pending.map(entry => entry.id), ['BV0000000006', 'BV0000000007']);
+notificationFail = false;
+await message('save', { settings: { rules: { ...listRules, video: { ...videoList, uids: ['20'] } }, quickCheck: false } });
+equal(store.state.pending.map(entry => entry.id), ['BV0000000006']);
+await message('check');
+equal(sent.slice(beforeRetryList).map(entry => entry.id), ['video:BV0000000006']);
 
 const manifest = JSON.parse(await fs.readFile(new URL('manifest.json', root), 'utf8'));
 const optionsHtml = await fs.readFile(new URL(optionsPage, root), 'utf8');

@@ -1,11 +1,15 @@
 import { KINDS, KIND_LABELS } from '../core.js';
 
+export const LIST_LABELS = { allow: '白名单', block: '黑名单' };
+const LIST_HINTS = { allow: '只提醒勾选的 UP 主。', block: '跳过勾选的 UP 主，其余已关注的 UP 主照常提醒。' };
+
 export function createFollowPicker({ loadPage, loadWhisperList, confirm }) {
   const dialog = document.getElementById('follow-picker');
   const field = id => dialog.querySelector(`#picker-${id}`);
   const list = field('list');
   const search = field('search');
   const onlySelected = field('only-selected');
+  const listMode = field('list-mode');
   const bulkButtons = dialog.querySelectorAll('[data-selection]');
   const retry = field('retry');
   const tabs = {};
@@ -14,12 +18,15 @@ export function createFollowPicker({ loadPage, loadWhisperList, confirm }) {
   function renderSummary() {
     for (const kind of KINDS) {
       tabs[kind].setAttribute('aria-pressed', String(kind === session.kind));
-      tabs[kind].lastElementChild.textContent = session.draft[kind].size;
+      tabs[kind].lastElementChild.textContent = session.draft[kind].uids.size;
     }
-    field('count').textContent = `已选 ${session.draft[session.kind].size} 位`;
+    const rule = session.draft[session.kind];
+    listMode.value = rule.listMode;
+    field('mode-hint').textContent = LIST_HINTS[rule.listMode];
+    field('count').textContent = `${LIST_LABELS[rule.listMode]}已选 ${rule.uids.size} 位`;
     const scope = field('scope');
-    scope.hidden = session.modes[session.kind] === 'selected';
-    scope.textContent = '将此类提醒范围切换为「仅指定的已关注 UP 主」后，才会使用这份名单。';
+    scope.hidden = rule.mode === 'selected';
+    scope.textContent = '将此类提醒范围切换为「按黑白名单筛选」后，才会使用这份名单。';
   }
 
   function renderProgress() {
@@ -39,7 +46,7 @@ export function createFollowPicker({ loadPage, loadWhisperList, confirm }) {
 
   function renderList(resetScroll = false) {
     const { people, whispers, draft, kind, loading, whisperLoading, error, accountChanged } = session;
-    const selected = draft[kind];
+    const selected = draft[kind].uids;
     const filter = search.value.trim().toLowerCase();
     const candidates = accountChanged ? new Map() : new Map([...people, ...whispers]);
     if (!accountChanged) {
@@ -181,11 +188,15 @@ export function createFollowPicker({ loadPage, loadWhisperList, confirm }) {
     field('kinds').append(button);
     tabs[kind] = button;
   }
+  listMode.addEventListener('change', () => {
+    session.draft[session.kind].listMode = listMode.value;
+    renderSummary();
+  });
   search.addEventListener('input', () => renderList(true));
   onlySelected.addEventListener('change', () => renderList(true));
   for (const button of bulkButtons) {
     button.addEventListener('click', () => {
-      const selected = session.draft[session.kind];
+      const selected = session.draft[session.kind].uids;
       const action = button.dataset.selection;
       // 使用已经显示的筛选结果，包括列表中需要滚动才能看到的条目。
       for (const input of list.querySelectorAll('input[data-uid]')) {
@@ -201,7 +212,7 @@ export function createFollowPicker({ loadPage, loadWhisperList, confirm }) {
     const input = event.target;
     const uid = input.dataset.uid;
     if (!uid || session.accountChanged) return;
-    const selected = session.draft[session.kind];
+    const selected = session.draft[session.kind].uids;
     if (input.checked) selected.add(uid);
     else selected.delete(uid);
     renderSummary();
@@ -232,7 +243,10 @@ export function createFollowPicker({ loadPage, loadWhisperList, confirm }) {
   });
   field('confirm').addEventListener('click', () => {
     if (session.accountChanged) return;
-    confirm(session.draft);
+    confirm(Object.fromEntries(KINDS.map(kind => {
+      const { listMode, uids } = session.draft[kind];
+      return [kind, { listMode, uids: [...uids] }];
+    })));
     close();
   });
 
@@ -240,8 +254,10 @@ export function createFollowPicker({ loadPage, loadWhisperList, confirm }) {
     if (dialog.open) return;
     session = {
       kind, people: new Map(), whispers: new Map(), page: 1, total: null,
-      draft: Object.fromEntries(KINDS.map(key => [key, new Set(rules[key].uids)])),
-      modes: Object.fromEntries(KINDS.map(key => [key, rules[key].mode]))
+      draft: Object.fromEntries(KINDS.map(key => {
+        const rule = rules[key];
+        return [key, { ...rule, uids: new Set(rule.uids) }];
+      }))
     };
     search.value = '';
     onlySelected.checked = false;

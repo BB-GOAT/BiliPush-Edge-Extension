@@ -20,8 +20,11 @@ export class CheckError extends Error {
 
 function normalizeRule(input, fallback) {
   const mode = ['all', 'selected', 'off'].includes(input?.mode) ? input.mode : fallback;
-  const uids = Array.isArray(input?.uids) ? input.uids.map(String).filter(uid => DIGITS.test(uid)) : [];
-  return { mode, uids: [...new Set(uids)] };
+  const listMode = input?.listMode === 'block' ? 'block' : 'allow';
+  // 兼容测试版保存的独立黑名单，沿用当前模式下生效的勾选。
+  const savedUids = listMode === 'block' && Array.isArray(input?.blockedUids) ? input.blockedUids : input?.uids;
+  const uids = Array.isArray(savedUids) ? savedUids.map(String).filter(uid => DIGITS.test(uid)) : [];
+  return { mode, listMode, uids: [...new Set(uids)] };
 }
 
 export function normalizeSettings(input = {}) {
@@ -125,7 +128,10 @@ export function liveFromResponse(data) {
 
 export function matches(item, settings) {
   const rule = settings.rules[item.kind ?? 'video'];
-  return rule?.mode === 'all' || (rule?.mode === 'selected' && rule.uids.includes(item.uid));
+  if (rule?.mode === 'all') return true;
+  if (rule?.mode !== 'selected') return false;
+  const selected = rule.uids.includes(item.uid);
+  return rule.listMode === 'block' ? !selected : selected;
 }
 
 export async function scanFeed(getPage, previousIds, maxPages, parseItem = videoFromItem, feedId) {

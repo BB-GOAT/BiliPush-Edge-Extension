@@ -70,6 +70,13 @@
     <button id="picker-close" class="secondary picker-close" type="button" aria-label="关闭选择面板">×</button>
   </div>
   <div id="picker-kinds" role="group" aria-label="提醒类别"></div>
+  <div class="picker-mode">
+    <label>名单模式<select id="picker-list-mode" aria-describedby="picker-mode-hint">
+      <option value="allow">白名单</option>
+      <option value="block">黑名单</option>
+    </select></label>
+    <span id="picker-mode-hint" class="hint"></span>
+  </div>
   <div class="picker-filters">
     <input id="picker-search" type="search" placeholder="搜索 UP 主昵称" aria-label="搜索 UP 主昵称" autofocus>
     <label class="toggle"><input id="picker-only-selected" type="checkbox">仅看已选</label>
@@ -110,7 +117,7 @@
     <label>提醒范围<select>
       <option value="off">关闭</option>
       <option value="all">所有已关注的 UP 主</option>
-      <option value="selected">仅指定的已关注 UP 主</option>
+      <option value="selected">按黑白名单筛选</option>
     </select></label>
     <div class="rule-selection" hidden>
       <strong></strong>

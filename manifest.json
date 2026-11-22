@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "哔哩哔哩推送",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "当关注的UP开播或更新视频/动态时发出Windows通知提醒",
   "permissions": [
     "alarms",

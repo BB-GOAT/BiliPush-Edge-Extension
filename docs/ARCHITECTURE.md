@@ -22,7 +22,7 @@
 | --- | --- |
 | settings.enabled / interval | 自动检查开关；普通检查间隔 1～60 分钟 |
 | settings.quickCheck / fullInterval | 快查默认开启；完整补查间隔 5～60 分钟。旧设置默认取 15 分钟和原间隔中的较大值 |
-| settings.rules | `video`、`dynamic`、`live` 各自有 `mode`（`all`、`selected`、`off`）和字符串 UID 列表。升级时读取旧 `mode` / `uids` 作为 `video` |
+| settings.rules | `video`、`dynamic`、`live` 各自有 `mode`（`all`、`selected`、`off`）、`listMode`（`allow` 或 `block`）和共用的勾选名单 `uids`。`selected` 范围下，`listMode` 决定是否提醒命中名单的内容。旧设置默认白名单，旧顶层 `mode` / `uids` 仍作为 `video` 读取。测试版的独立名单按已保存的模式沿用当时生效的名单 |
 | settings.silent / maxPages | 静音；最大页数 1～10 |
 | settings.issueLimit | 会话运行日志上限，20、50 或 100 条，旧设置默认为 50 |
 | state.account / accountName | 当前账号 UID 与昵称，用于账号隔离和面板显示 |

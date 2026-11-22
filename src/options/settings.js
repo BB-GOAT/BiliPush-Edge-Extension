@@ -1,6 +1,6 @@
 import { KINDS, KIND_LABELS, LIVE_PERMISSION, itemUrl } from '../core.js';
 import { LOG_KEY } from '../diagnostics.js';
-import { createFollowPicker } from './follow-picker.js';
+import { createFollowPicker, LIST_LABELS } from './follow-picker.js';
 
 const $ = id => document.getElementById(id);
 let busy = false;
@@ -35,7 +35,7 @@ const picker = createFollowPicker({
   loadWhisperList: account => send('whispers', { account }),
   confirm(draft) {
     for (const kind of KINDS) {
-      ruleFields[kind].uids = [...draft[kind]];
+      ruleFields[kind].list = draft[kind];
       ruleFields[kind].sync();
     }
     $('feedback').textContent = '名单已更新，点击「保存设置」后生效。';
@@ -47,17 +47,18 @@ for (const kind of KINDS) {
   const mode = group.querySelector('select');
   const selection = group.querySelector('.rule-selection');
   const choose = selection.querySelector('button');
-  const field = { mode, uids: [], sync() {
+  const field = { mode, list: { listMode: 'allow', uids: [] }, sync() {
     const selected = mode.value === 'selected';
     selection.hidden = !selected;
     selection.closest('fieldset').classList.toggle('rule-selected', selected);
-    selection.querySelector('strong').textContent = `已选 ${field.uids.length} 位`;
+    const { listMode, uids } = field.list;
+    selection.querySelector('strong').textContent = `${LIST_LABELS[listMode]} · 已选 ${uids.length} 位`;
   } };
   choose.setAttribute('aria-label', `选择${KIND_LABELS[kind]}提醒的 UP 主`);
   choose.addEventListener('click', () => {
     if (!loaded || busy) return;
     const rules = Object.fromEntries(KINDS.map(key => [key, {
-      mode: ruleFields[key].mode.value, uids: ruleFields[key].uids
+      mode: ruleFields[key].mode.value, ...ruleFields[key].list
     }]));
     picker.open(kind, rules);
   });
@@ -259,8 +260,9 @@ function render({ settings, state, diagnostics }, fill = false) {
     for (const key of ['enabled', 'quickCheck', 'silent']) $(key).checked = settings[key];
     for (const kind of KINDS) {
       const field = ruleFields[kind];
-      field.mode.value = settings.rules[kind].mode;
-      field.uids = settings.rules[kind].uids;
+      const { mode, ...list } = settings.rules[kind];
+      field.mode.value = mode;
+      field.list = list;
       field.sync();
     }
     loaded = true;
@@ -309,11 +311,11 @@ $('settings').addEventListener('submit', event => {
   void action(event.submitter, 'feedback', async () => {
     const rules = {};
     for (const kind of KINDS) {
-      const { mode, uids } = ruleFields[kind];
-      if (mode.value === 'selected' && !uids.length) {
-        throw new Error(`${KIND_LABELS[kind]}：请在选择面板中至少勾选一位 UP 主。`);
+      const { mode, list } = ruleFields[kind];
+      if (mode.value === 'selected' && list.listMode === 'allow' && !list.uids.length) {
+        throw new Error(`${KIND_LABELS[kind]}的白名单至少要勾选一位 UP 主。`);
       }
-      rules[kind] = { mode: mode.value, uids };
+      rules[kind] = { mode: mode.value, ...list };
     }
     const settings = {
       enabled: $('enabled').checked, quickCheck: $('quickCheck').checked, silent: $('silent').checked,
